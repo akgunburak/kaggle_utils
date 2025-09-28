@@ -428,8 +428,6 @@ def objective_rf_cv(trial, task, cross_val_splits, X, y, path,
     path : CSV file path where logs will be appended
     """
 
-    from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-
     # ----- parameter space -----
     param = {
         'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
@@ -537,4 +535,38 @@ def objective_rf_cv(trial, task, cross_val_splits, X, y, path,
     print(f"[{metric}] Fold scores: {fold_scores} | Average: {avg_score:.4f}")
     return avg_score
 
-                                  
+# example usage
+
+# for random forest
+"""
+import * from encoding
+X_train_rf, X_test_rf, encoders = encode_categorical(
+    X_train, X_test, y_train,
+    ohe_max_cardinality=3,
+    high_cardinality_strategy="target" # or ordinal
+"""
+
+
+"""
+splits_bin = list(StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+                  .split(X_bin, y_bin))
+
+study = optuna.create_study(direction="maximize")
+study.optimize(lambda trial: objective_rf_cv(
+    trial=trial,
+    task='binary', #multiclass, regression
+    cross_val_splits=splits_bin,
+    X=X_bin, y=y_bin,
+    path='cv_log_binary.csv',
+    metric="f1"
+),
+              n_trials=3)
+
+print("Best hyperparameters:", study.best_params)
+
+with open("xgb_params.pkl", "wb") as file:
+    pickle.dump(study.best_params, file)
+"""
+
+
+
