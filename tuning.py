@@ -304,12 +304,22 @@ def objective_cb_cv(trial, task, cross_val_splits, X, y, path,
         'depth': trial.suggest_int('depth', 4, 10),  # typical effective depths
         'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1e-2, 10.0, log=True),
         'border_count': trial.suggest_int('border_count', 32, 128),  # fewer splits
-        'subsample': trial.suggest_float('subsample', 0.5, 1),
         'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.3, 1),
         'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 20, 300),
         'random_seed': 2020,
         'verbose': False
     }
+
+    # choose a bootstrap type compatible with subsample or not
+    bootstrap_type = trial.suggest_categorical('bootstrap_type', ['Bayesian', 'Bernoulli', 'Poisson'])
+    param['bootstrap_type'] = bootstrap_type
+    
+    if bootstrap_type == 'Bayesian':
+        # subsample is NOT allowed; use bagging_temperature instead (0 => no sampling, higher => more)
+        param['bagging_temperature'] = trial.suggest_float('bagging_temperature', 0.0, 10.0)
+    else:
+        # subsample IS allowed for Bernoulli/Poisson
+        param['subsample'] = trial.suggest_float('subsample', 0.5, 1.0)
 
     if task == 'binary':
         param['loss_function'] = 'Logloss'
