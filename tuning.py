@@ -311,7 +311,7 @@ def objective_cb_cv(trial, task, cross_val_splits, X, y, path,
     }
 
     # choose a bootstrap type compatible with subsample or not
-    bootstrap_type = trial.suggest_categorical('bootstrap_type', ['Bayesian', 'Bernoulli', 'Poisson'])
+    bootstrap_type = trial.suggest_categorical('bootstrap_type', ['Bayesian', 'Bernoulli'])
     param['bootstrap_type'] = bootstrap_type
     
     if bootstrap_type == 'Bayesian':
