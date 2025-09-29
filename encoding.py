@@ -1,3 +1,8 @@
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
+from category_encoders import TargetEncoder
+
 def encode_categorical(
     X_train: pd.DataFrame,
     X_test: pd.DataFrame,
