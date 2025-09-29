@@ -11,6 +11,7 @@ from sklearn.metrics import (
 import os
 import optuna
 import pickle
+from encoding import *
 
 def objective_xgb_cv(trial, task, cross_val_splits, X, y, path,
                      metric="f1", pos_weight=None, n_classes=None):
@@ -423,7 +424,6 @@ def objective_rf_cv(trial, task, cross_val_splits, X, y, path,
     ----------
     task : 'binary', 'multiclass', or 'regression'
     metric : evaluation metric to optimize ('f1','accuracy','auc','rmse','mae',...)
-    pos_weight : for binary classification
     n_classes : required for multiclass classification
     path : CSV file path where logs will be appended
     """
@@ -448,6 +448,13 @@ def objective_rf_cv(trial, task, cross_val_splits, X, y, path,
     for fold, (train_idx_cv, val_idx_cv) in enumerate(cross_val_splits, start=1):
         X_train_cv, X_val = X.loc[train_idx_cv], X.loc[val_idx_cv]
         y_train_cv, y_val = y.loc[train_idx_cv], y.loc[val_idx_cv]
+
+        # Encode using training fold only
+        X_train_cv, X_val, encoders = encode_categorical(
+            X_train_cv, X_val, y_train_cv,
+            ohe_max_cardinality=3,
+            high_card_strategy="target"  # or "ordinal"
+        )
 
         if task in ['binary', 'multiclass']:
             model = RandomForestClassifier(**param)
@@ -535,18 +542,8 @@ def objective_rf_cv(trial, task, cross_val_splits, X, y, path,
     print(f"[{metric}] Fold scores: {fold_scores} | Average: {avg_score:.4f}")
     return avg_score
 
+
 # example usage
-
-# for random forest
-"""
-from encoding import *
-X_train_rf, X_test_rf, encoders = encode_categorical(
-    X_train, X_test, y_train,
-    ohe_max_cardinality=3,
-    high_cardinality_strategy="target" # or ordinal
-"""
-
-# rf and others
 """
 splits_bin = list(StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
                   .split(X_bin, y_bin))
