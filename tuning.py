@@ -539,14 +539,14 @@ def objective_rf_cv(trial, task, cross_val_splits, X, y, path,
 
 # for random forest
 """
-import * from encoding
+from encoding import *
 X_train_rf, X_test_rf, encoders = encode_categorical(
     X_train, X_test, y_train,
     ohe_max_cardinality=3,
     high_cardinality_strategy="target" # or ordinal
 """
 
-
+# rf and others
 """
 splits_bin = list(StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
                   .split(X_bin, y_bin))
