@@ -1,10 +1,14 @@
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import StratifiedKFold, KFold
+
+
 def get_oof_predictions(models, X, y, X_test, folds=None, scorer=None, task='classification'):
     """
     Generate OOF predictions for stacking (classification or regression).
     Returns OOF train/test as pandas DataFrames.
     """
     if folds is None:
-        from sklearn.model_selection import StratifiedKFold, KFold
         folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=42) if task=='classification' else KFold(n_splits=5, shuffle=True, random_state=42)
     
     n_train = X.shape[0]
