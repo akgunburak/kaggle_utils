@@ -1,15 +1,15 @@
 import pandas as pd
 import numpy as np
-from typing import List, Iterable, Tuple, Dict, Any
+from typing import List, Iterable, Tuple, Dict, Any, Optional, Callable
 import pickle
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import f1_score, roc_auc_score
+from sklearn.metrics import f1_score, roc_auc_score, mean_squared_error
 import lightgbm as lgb
 from boruta import BorutaPy
 import ppscore as pps
 from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
-from sklearn.base import clone
+from sklearn.base import clone, is_classifier, is_regressor
 
 
 def drop_correlated_vars(X, y, corr_thr=0.9, matrix_to_excel=False, verbose=True):
@@ -104,45 +104,86 @@ def custom_rfe(
     X: pd.DataFrame,
     y: pd.Series,
     folds: List[Tuple[np.ndarray, np.ndarray]],
-    estimator,  # preconfigured, unfitted estimator (e.g., lgb.LGBMClassifier(...))
+    estimator,
     n_features_to_drop: int = 5,
     n_features_to_stop: int = 20,
     early_stopping_rounds: int = 50,
+    scorer: Optional[Callable[..., float]] = None,
 ) -> Dict[str, Any]:
     """
-    Iterative feature elimination using a user-provided estimator and user-provided folds.
+    Iterative feature elimination using user-provided estimator and folds.
+    Works for classification (binary/multiclass) and regression.
 
-    Args:
-        X, y: data and labels (X must be a DataFrame so we can track columns)
-        folds: list of (train_idx, val_idx) numpy arrays (your CV definition)
-        estimator: an unfitted estimator with .fit(), .predict_proba(), and .feature_importances_
-                   (e.g., lgb.LGBMClassifier preconfigured with your preferred params/importance_type)
-        n_features_to_drop: features to remove per iteration
-        n_features_to_stop: stop when this many features remain
-        early_stopping_rounds: if >0 and estimator supports LightGBM callbacks, apply early stopping
+    Args
+    ----
+    X, y          : Data and targets. X must be a DataFrame.
+    folds         : List of (train_idx, val_idx) numpy arrays.
+    estimator     : Unfitted sklearn-style estimator. Must expose feature_importances_ after fit.
+    n_features_to_drop : Features to remove per iteration.
+    n_features_to_stop : Stop when this many features remain.
+    early_stopping_rounds : If >0 and estimator is LightGBM, applies early stopping with eval_set.
+    scorer        : Optional callable to compute a *higher-is-better* score.
+                    Signature options:
+                      - scorer(y_true, y_pred)                # generic
+                      - scorer(y_true, y_pred, y_proba=None)  # if you want probs too
+                    If None:
+                      * classification -> F1-macro on hard predictions
+                      * regression     -> negative RMSE (-sqrt(MSE))
 
-    Returns:
-        {
-          "best_features": list[str],
-          "best_cv_f1": float,
-          "history": list[dict],
-          "final_model": fitted_estimator_on_best_subset
-        }
+    Returns
+    -------
+    {
+      "best_features": list[str],       # feature subset with max mean CV score
+      "best_cv_score": float,           # mean CV score at that subset
+      "history": list[dict],            # per-step logs (n_features, cv_mean, cv_std, etc.)
+      "final_model": fitted_estimator   # trained on full data with best subset
+    }
     """
     cols = list(X.columns)
+    if n_features_to_stop >= len(cols):
+        # Nothing to drop; just train and return
+        final_model = clone(estimator).fit(X, y)
+        return {
+            "best_features": cols,
+            "best_cv_score": np.nan,
+            "history": [],
+            "final_model": final_model,
+        }
+
+    # default scorers
+    def default_classification_scorer(y_true, y_pred, y_proba=None):
+        return float(f1_score(y_true, y_pred, average="macro"))
+
+    def default_regression_scorer(y_true, y_pred):
+        rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+        return -rmse  # higher is better
+
+    # wrapper to call user scorer or defaults
+    def compute_score(y_true, y_pred, y_proba=None):
+        if scorer is not None:
+            try:
+                # try flexible 3-arg signature (y_true, y_pred, y_proba)
+                return float(scorer(y_true, y_pred, y_proba))
+            except TypeError:
+                # fallback to 2-arg signature (y_true, y_pred)
+                return float(scorer(y_true, y_pred))
+        # defaults:
+        if is_classifier(estimator):
+            return default_classification_scorer(y_true, y_pred, y_proba)
+        elif is_regressor(estimator):
+            return default_regression_scorer(y_true, y_pred)
+        else:
+            raise ValueError("Estimator must be a classifier or regressor.")
+
     history = []
     dropped_cum = []
-    best_cv_f1 = -1.0
+    best_cv_score = -np.inf
     best_features = cols.copy()
-
-    # detect categorical features by dtype if useful for your estimator
-    categorical_cols = [c for c in cols if getattr(X[c].dtype, "name", "") == "category"]
 
     step = 0
     while len(cols) > n_features_to_stop:
-        # 1) CV training on current feature set
         imp_sum = pd.Series(0.0, index=cols)
-        f1_scores = []
+        fold_scores = []
 
         for tr_idx, va_idx in folds:
             Xtr, Xva = X.iloc[tr_idx][cols], X.iloc[va_idx][cols]
@@ -150,61 +191,71 @@ def custom_rfe(
 
             model = clone(estimator)
 
-            # LightGBM-specific early stopping via callbacks (silently skip if not LGBM)
             fit_kwargs = {}
-            if isinstance(model, lgb.LGBMClassifier) and early_stopping_rounds and early_stopping_rounds > 0:
+            # Optional LightGBM early stopping (classification or regression)
+            if isinstance(model, (lgb.LGBMClassifier, lgb.LGBMRegressor)) and early_stopping_rounds and early_stopping_rounds > 0:
                 fit_kwargs["eval_set"] = [(Xva, yva)]
                 fit_kwargs["callbacks"] = [lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=False)]
-                # If you want categorical handling, ensure model is configured accordingly.
-                # LightGBM will infer categoricals from dtype='category'.
+                # LightGBM will infer categoricals from dtype='category'
 
             model.fit(Xtr, ytr, **fit_kwargs)
 
-            # accumulate importances
-            if hasattr(model, "feature_importances_"):
-                imp_sum += pd.Series(model.feature_importances_, index=cols)
-            else:
+            if not hasattr(model, "feature_importances_"):
                 raise ValueError("Estimator must expose feature_importances_ for RFE dropping logic.")
+            imp_sum += pd.Series(model.feature_importances_, index=cols)
 
-            # fold F1
-            proba = model.predict(Xva)
-            f1_scores.append(f1_score(yva, proba))
+            # predictions for scoring
+            if is_classifier(model):
+                # Prefer hard predictions for multiclass; works for binary too
+                y_pred = model.predict(Xva)
+                y_proba = None
+                # If user scorer wants proba and model provides it, hand it over
+                if hasattr(model, "predict_proba"):
+                    try:
+                        y_proba = model.predict_proba(Xva)
+                    except Exception:
+                        y_proba = None
+                score = compute_score(yva, y_pred, y_proba)
+            else:
+                # regression
+                y_pred = model.predict(Xva)
+                score = compute_score(yva, y_pred)
+
+            fold_scores.append(float(score))
 
         imp_mean = imp_sum / len(folds)
-        cv_f1_mean = float(np.mean(f1_scores))
-        cv_f1_std = float(np.std(f1_scores, ddof=1)) if len(f1_scores) > 1 else 0.0
+        cv_mean = float(np.mean(fold_scores))
+        cv_std = float(np.std(fold_scores, ddof=1)) if len(fold_scores) > 1 else 0.0
 
-        # 2) log before dropping
         history.append({
             "step": step,
             "n_features": len(cols),
             "features_used": cols.copy(),
             "dropped_cumulative": dropped_cum.copy(),
-            "cv_f1_mean": cv_f1_mean,
-            "cv_f1_std": cv_f1_std,
+            "cv_score_mean": cv_mean,
+            "cv_score_std": cv_std,
         })
 
-        # 3) update best subset if improved (tie-breaker: fewer features)
-        if (cv_f1_mean > best_cv_f1) or (np.isclose(cv_f1_mean, best_cv_f1) and len(cols) < len(best_features)):
-            best_cv_f1 = cv_f1_mean
+        # update best subset (tie-breaker: fewer features)
+        if (cv_mean > best_cv_score) or (np.isclose(cv_mean, best_cv_score) and len(cols) < len(best_features)):
+            best_cv_score = cv_mean
             best_features = cols.copy()
 
-        # 4) decide how many to drop and drop least important
+        # decide how many to drop without overshooting
         k_max = len(cols) - n_features_to_stop
         k = int(min(n_features_to_drop, k_max))
         dropped_this = list(imp_mean.sort_values(ascending=True).head(k).index)
 
         dropped_cum.extend(dropped_this)
         cols = [c for c in cols if c not in dropped_this]
-        print(f"step {step}: kept {len(cols)} features --> cv_f1_mean: {cv_f1_mean}")
+        print(f"step {step}: kept {len(cols)} features --> Score: {best_cv_score}")
         step += 1
 
-    # Final model on full data with the best subset
     final_model = clone(estimator).fit(X[best_features], y)
 
     return {
         "best_features": best_features,
-        "best_cv_f1": best_cv_f1,
+        "best_cv_score": best_cv_score,
         "history": history,
         "final_model": final_model,
     }
