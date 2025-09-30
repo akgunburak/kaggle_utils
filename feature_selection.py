@@ -12,6 +12,14 @@ from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
 from sklearn.base import clone, is_classifier, is_regressor
 
 
+def drop_high_null_columns(df, threshold=50, show=False):
+    null_percent = (df.isnull().sum() / len(df)) * 100
+    cols_to_drop = null_percent[null_percent > threshold].index
+    if show:
+        print(f"Columns to drop: {list(cols_to_drop)}")
+    return cols_to_drop.to_list()
+
+
 def drop_correlated_vars(X, y, corr_thr=0.9, matrix_to_excel=False, verbose=True):
     numeric_cols = X.select_dtypes(include=['number']).columns
     corr_matrix = X[numeric_cols].corr()
@@ -39,14 +47,6 @@ def drop_correlated_vars(X, y, corr_thr=0.9, matrix_to_excel=False, verbose=True
         print(variable)
     print("*********Number of variables dropped by correlation(each other): ", len(vars_to_del), "\n")
     return vars_to_del
-
-
-def drop_high_null_columns(df, threshold=50, show=False):
-    null_percent = (df.isnull().sum() / len(df)) * 100
-    cols_to_drop = null_percent[null_percent > threshold].index
-    if show:
-        print(f"Columns to drop: {list(cols_to_drop)}")
-    return cols_to_drop.to_list()
 
 
 def drop_by_pps(
@@ -98,6 +98,164 @@ def drop_by_pps(
                     to_drop.append(f1)
 
     return sorted(set(to_drop))
+
+
+def boruta_feature_selection(X_train, X_test, y_train):
+    # Find numerical and categorical columns
+    numerical_cols = X_train.select_dtypes(include=[np.number]).columns
+    categorical_cols = X_train.select_dtypes(exclude=[np.number]).columns
+
+    # Fill the numerical data with median
+    if len(numerical_cols) > 0:
+        num_imputer = SimpleImputer(strategy='median')
+        X_train[numerical_cols] = num_imputer.fit_transform(X_train[numerical_cols])
+
+    # Fill the categorical data with mode
+    if len(categorical_cols) > 0:
+        cat_imputer = SimpleImputer(strategy='most_frequent')
+        X_train[categorical_cols] = cat_imputer.fit_transform(X_train[categorical_cols])
+            
+    X_train, X_test, encoders = encode_categorical(
+    X_train, X_test, y_train,
+    ohe_max_cardinality=0,
+    high_card_strategy="target"  # or "ordinal"
+    )
+            
+    # define model and boruta objects
+    rf = RandomForestClassifier(n_jobs=-1, class_weight='balanced', max_depth=5)
+    boruta_selector = BorutaPy(rf, n_estimators='auto', verbose=1, random_state=42)
+
+    # training
+    boruta_selector.fit(X_train, y_train)
+
+    # selected features
+    selected_features = X_train.columns[boruta_selector.support_]
+    return selected_features
+
+
+def adversarial_validation(
+    df: pd.DataFrame,
+    folds: Iterable[Tuple[np.ndarray, np.ndarray]],
+    target_col: str = "__is_test__",
+    lgb_params: Dict[str, Any] = None,
+    num_boost_round: int = 5000
+):
+    """
+    Adversarial Validation using precomputed folds.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Combined dataset containing both train & test rows and a binary flag column `target_col`.
+        0 = train, 1 = test.
+    folds : iterable of (train_idx, valid_idx)
+        Precomputed folds (e.g., from StratifiedKFold.split). Indices must align with `df`.
+    target_col : str
+        Column name of the 0/1 adversarial target flag.
+    lgb_params : dict
+        LightGBM parameters (defaults provided if None).
+    num_boost_round : int
+
+    Returns
+    -------
+    results : dict
+        {
+          'auc': float,
+          'oof_pred': np.ndarray,
+          'fold_aucs': List[float],
+          'models': List[lgb.Booster],
+          'features': List[str],
+          'importances': pd.DataFrame,          # long form
+          'avg_importance': pd.DataFrame        # aggregated
+        }
+    """
+    if target_col not in df.columns:
+        raise ValueError(f"`{target_col}` not found in df columns.")
+
+    # infer features automatically (everything except target)
+    features: List[str] = [c for c in df.columns if c != target_col]
+
+    X = df[features]
+    y = df[target_col].astype(int).values
+
+    if lgb_params is None:
+        lgb_params = dict(
+            objective="binary",
+            metric="auc",
+            boosting_type="gbdt",
+            learning_rate=0.05,
+            num_leaves=64,
+            max_depth=-1,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            min_child_samples=20,
+            reg_alpha=0.0,
+            reg_lambda=0.0,
+            verbosity=-1,
+            seed=42,
+            feature_fraction_seed=42,
+            bagging_seed=42,
+            n_jobs=-1,
+        )
+
+    oof = np.zeros(len(df))
+    fold_aucs: List[float] = []
+    models: List[lgb.Booster] = []
+    imp_rows = []
+
+    for i, (train_idx, valid_idx) in enumerate(folds, 1):
+        X_tr, X_va = X.iloc[train_idx], X.iloc[valid_idx]
+        y_tr, y_va = y[train_idx], y[valid_idx]
+
+        dtr = lgb.Dataset(X_tr, label=y_tr, feature_name=features, free_raw_data=False)
+        dva = lgb.Dataset(X_va, label=y_va, feature_name=features, free_raw_data=False)
+
+        model = lgb.train(
+            lgb_params,
+            dtr,
+            valid_sets=[dtr, dva],
+            valid_names=["train", "valid"],
+            num_boost_round=num_boost_round,
+        )
+
+        models.append(model)
+        preds = model.predict(X_va, num_iteration=model.best_iteration)
+        oof[valid_idx] = preds
+        auc = roc_auc_score(y_va, preds)
+        fold_aucs.append(auc)
+        print(f"[Fold {i}] best_iter={model.best_iteration} | AUC={auc:.6f}")
+
+        # importances
+        gain = model.feature_importance(importance_type="gain")
+        split = model.feature_importance(importance_type="split")
+        for f, g, s in zip(features, gain, split):
+            imp_rows.append({"fold": i, "feature": f, "gain": float(g), "split": int(s)})
+
+    overall_auc = roc_auc_score(y, oof)
+    print("\n=== Adversarial Validation Report ===")
+    print(f"OOF AUC: {overall_auc:.6f}")
+    print("Per-fold:", [f"{a:.6f}" for a in fold_aucs])
+
+    importances = pd.DataFrame(imp_rows)
+    avg_importance = (
+        importances.groupby("feature", as_index=False)
+        .agg(gain_mean=("gain", "mean"),
+             gain_std=("gain", "std"),
+             split_mean=("split", "mean"),
+             split_std=("split", "std"))
+        .sort_values("gain_mean", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    return {
+        "auc": float(overall_auc),
+        "oof_pred": oof,
+        "fold_aucs": fold_aucs,
+        "models": models,
+        "features": features,
+        "importances": importances,
+        "avg_importance": avg_importance,
+    }
 
 
 def custom_rfe(
@@ -258,162 +416,4 @@ def custom_rfe(
         "best_cv_score": best_cv_score,
         "history": history,
         "final_model": final_model,
-    }
-
-
-def boruta_feature_selection(X_train, X_test, y_train):
-    # Find numerical and categorical columns
-    numerical_cols = X_train.select_dtypes(include=[np.number]).columns
-    categorical_cols = X_train.select_dtypes(exclude=[np.number]).columns
-
-    # Fill the numerical data with median
-    if len(numerical_cols) > 0:
-        num_imputer = SimpleImputer(strategy='median')
-        X_train[numerical_cols] = num_imputer.fit_transform(X_train[numerical_cols])
-
-    # Fill the categorical data with mode
-    if len(categorical_cols) > 0:
-        cat_imputer = SimpleImputer(strategy='most_frequent')
-        X_train[categorical_cols] = cat_imputer.fit_transform(X_train[categorical_cols])
-            
-    X_train, X_test, encoders = encode_categorical(
-    X_train, X_test, y_train,
-    ohe_max_cardinality=0,
-    high_card_strategy="target"  # or "ordinal"
-    )
-            
-    # define model and boruta objects
-    rf = RandomForestClassifier(n_jobs=-1, class_weight='balanced', max_depth=5)
-    boruta_selector = BorutaPy(rf, n_estimators='auto', verbose=1, random_state=42)
-
-    # training
-    boruta_selector.fit(X_train, y_train)
-
-    # selected features
-    selected_features = X_train.columns[boruta_selector.support_]
-    return selected_features
-
-
-def adversarial_validation(
-    df: pd.DataFrame,
-    folds: Iterable[Tuple[np.ndarray, np.ndarray]],
-    target_col: str = "__is_test__",
-    lgb_params: Dict[str, Any] = None,
-    num_boost_round: int = 5000
-):
-    """
-    Adversarial Validation using precomputed folds.
-
-    Parameters
-    ----------
-    df : DataFrame
-        Combined dataset containing both train & test rows and a binary flag column `target_col`.
-        0 = train, 1 = test.
-    folds : iterable of (train_idx, valid_idx)
-        Precomputed folds (e.g., from StratifiedKFold.split). Indices must align with `df`.
-    target_col : str
-        Column name of the 0/1 adversarial target flag.
-    lgb_params : dict
-        LightGBM parameters (defaults provided if None).
-    num_boost_round : int
-
-    Returns
-    -------
-    results : dict
-        {
-          'auc': float,
-          'oof_pred': np.ndarray,
-          'fold_aucs': List[float],
-          'models': List[lgb.Booster],
-          'features': List[str],
-          'importances': pd.DataFrame,          # long form
-          'avg_importance': pd.DataFrame        # aggregated
-        }
-    """
-    if target_col not in df.columns:
-        raise ValueError(f"`{target_col}` not found in df columns.")
-
-    # infer features automatically (everything except target)
-    features: List[str] = [c for c in df.columns if c != target_col]
-
-    X = df[features]
-    y = df[target_col].astype(int).values
-
-    if lgb_params is None:
-        lgb_params = dict(
-            objective="binary",
-            metric="auc",
-            boosting_type="gbdt",
-            learning_rate=0.05,
-            num_leaves=64,
-            max_depth=-1,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            min_child_samples=20,
-            reg_alpha=0.0,
-            reg_lambda=0.0,
-            verbosity=-1,
-            seed=42,
-            feature_fraction_seed=42,
-            bagging_seed=42,
-            n_jobs=-1,
-        )
-
-    oof = np.zeros(len(df))
-    fold_aucs: List[float] = []
-    models: List[lgb.Booster] = []
-    imp_rows = []
-
-    for i, (train_idx, valid_idx) in enumerate(folds, 1):
-        X_tr, X_va = X.iloc[train_idx], X.iloc[valid_idx]
-        y_tr, y_va = y[train_idx], y[valid_idx]
-
-        dtr = lgb.Dataset(X_tr, label=y_tr, feature_name=features, free_raw_data=False)
-        dva = lgb.Dataset(X_va, label=y_va, feature_name=features, free_raw_data=False)
-
-        model = lgb.train(
-            lgb_params,
-            dtr,
-            valid_sets=[dtr, dva],
-            valid_names=["train", "valid"],
-            num_boost_round=num_boost_round,
-        )
-
-        models.append(model)
-        preds = model.predict(X_va, num_iteration=model.best_iteration)
-        oof[valid_idx] = preds
-        auc = roc_auc_score(y_va, preds)
-        fold_aucs.append(auc)
-        print(f"[Fold {i}] best_iter={model.best_iteration} | AUC={auc:.6f}")
-
-        # importances
-        gain = model.feature_importance(importance_type="gain")
-        split = model.feature_importance(importance_type="split")
-        for f, g, s in zip(features, gain, split):
-            imp_rows.append({"fold": i, "feature": f, "gain": float(g), "split": int(s)})
-
-    overall_auc = roc_auc_score(y, oof)
-    print("\n=== Adversarial Validation Report ===")
-    print(f"OOF AUC: {overall_auc:.6f}")
-    print("Per-fold:", [f"{a:.6f}" for a in fold_aucs])
-
-    importances = pd.DataFrame(imp_rows)
-    avg_importance = (
-        importances.groupby("feature", as_index=False)
-        .agg(gain_mean=("gain", "mean"),
-             gain_std=("gain", "std"),
-             split_mean=("split", "mean"),
-             split_std=("split", "std"))
-        .sort_values("gain_mean", ascending=False)
-        .reset_index(drop=True)
-    )
-
-    return {
-        "auc": float(overall_auc),
-        "oof_pred": oof,
-        "fold_aucs": fold_aucs,
-        "models": models,
-        "features": features,
-        "importances": importances,
-        "avg_importance": avg_importance,
     }
