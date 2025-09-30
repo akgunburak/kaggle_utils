@@ -9,6 +9,7 @@ import lightgbm as lgb
 from boruta import BorutaPy
 import ppscore as pps
 from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
+from sklearn.base import clone
 
 
 def drop_correlated_vars(X, y, corr_thr=0.9, matrix_to_excel=False, verbose=True):
@@ -99,51 +100,114 @@ def drop_by_pps(
     return sorted(set(to_drop))
 
 
-def custom_rfe(X_train, X_test, y_train, y_test, path, n_features_to_drop=5, n_features_to_stop=20):
-    log_dict = {}
+def custom_rfe(
+    X: pd.DataFrame,
+    y: pd.Series,
+    folds: List[Tuple[np.ndarray, np.ndarray]],
+    estimator,  # preconfigured, unfitted estimator (e.g., lgb.LGBMClassifier(...))
+    n_features_to_drop: int = 5,
+    n_features_to_stop: int = 20,
+    early_stopping_rounds: int = 50,
+) -> Dict[str, Any]:
+    """
+    Iterative feature elimination using a user-provided estimator and user-provided folds.
+
+    Args:
+        X, y: data and labels (X must be a DataFrame so we can track columns)
+        folds: list of (train_idx, val_idx) numpy arrays (your CV definition)
+        estimator: an unfitted estimator with .fit(), .predict_proba(), and .feature_importances_
+                   (e.g., lgb.LGBMClassifier preconfigured with your preferred params/importance_type)
+        n_features_to_drop: features to remove per iteration
+        n_features_to_stop: stop when this many features remain
+        early_stopping_rounds: if >0 and estimator supports LightGBM callbacks, apply early stopping
+
+    Returns:
+        {
+          "best_features": list[str],
+          "best_cv_f1": float,
+          "history": list[dict],
+          "final_model": fitted_estimator_on_best_subset
+        }
+    """
+    cols = list(X.columns)
+    history = []
+    dropped_cum = []
+    best_cv_f1 = -1.0
+    best_features = cols.copy()
+
+    # detect categorical features by dtype if useful for your estimator
+    categorical_cols = [c for c in cols if getattr(X[c].dtype, "name", "") == "category"]
+
     step = 0
-    cols_to_drop = []
-    while len(X_train.columns) > n_features_to_stop:
-        # Train LightGBM
-        #train_data = lgb.Dataset(X_train, label=y_train)
-        #test_data = lgb.Dataset(X_test, label=y_test, reference=train_data)
-        lgbm_params = {
-            "categorical_feature": [col for col in X_train if X_train[col].dtype == 'category'],
-            "objective": "binary",
-            "metric": "binary_logloss",
-            'verbose': -1
-        }
-        with open(path, 'rb') as file:
-            lgbm_best_params = pickle.load(file)
-        lgbm_params.update(lgbm_best_params)
-        #lgbm_num_round = 1000
-        lgbm_model = lgb.LGBMClassifier(**lgbm_params)
-        lgbm_model.fit(
-                X_train,
-                y_train)
-        #model = lgb.train(params, train_data, num_boost_round=1000, valid_sets=[test_data])
-        lgbm_y_pred_proba = lgbm_model.predict_proba(X_test)
-        #lgbm_y_pred = lgbm_model.predict(X_test)
-        lgbm_y_pred = (lgbm_y_pred_proba[:, 1] >= 0.5).astype(int)
-        importance_df = pd.DataFrame({'Feature': lgbm_model.feature_names_in_, 'Importance': lgbm_model.feature_importances_})
-        importance_df = importance_df.sort_values(by='Importance', ascending=False)
-        lgbm_f1 = f1_score(y_test, lgbm_y_pred)
-    
-        log_dict_detail = {
-            "features_used": X_train.columns.to_list(),
-            "features_dropped": cols_to_drop,
-            "lgbm_f1": lgbm_f1
-        }
-        log_dict[step] = log_dict_detail
-    
-        cols_to_drop = importance_df.sort_values("Importance").head(n_features_to_drop)["Feature"].to_list()
-                
-        X_train = X_train.drop(cols_to_drop, axis=1)
-        X_test = X_test.drop(cols_to_drop, axis=1)
-        print("step: ", step, "n_features: ", len(X_train.columns))
+    while len(cols) > n_features_to_stop:
+        # 1) CV training on current feature set
+        imp_sum = pd.Series(0.0, index=cols)
+        f1_scores = []
+
+        for tr_idx, va_idx in folds:
+            Xtr, Xva = X.iloc[tr_idx][cols], X.iloc[va_idx][cols]
+            ytr, yva = y.iloc[tr_idx], y.iloc[va_idx]
+
+            model = clone(estimator)
+
+            # LightGBM-specific early stopping via callbacks (silently skip if not LGBM)
+            fit_kwargs = {}
+            if isinstance(model, lgb.LGBMClassifier) and early_stopping_rounds and early_stopping_rounds > 0:
+                fit_kwargs["eval_set"] = [(Xva, yva)]
+                fit_kwargs["callbacks"] = [lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=False)]
+                # If you want categorical handling, ensure model is configured accordingly.
+                # LightGBM will infer categoricals from dtype='category'.
+
+            model.fit(Xtr, ytr, **fit_kwargs)
+
+            # accumulate importances
+            if hasattr(model, "feature_importances_"):
+                imp_sum += pd.Series(model.feature_importances_, index=cols)
+            else:
+                raise ValueError("Estimator must expose feature_importances_ for RFE dropping logic.")
+
+            # fold F1
+            proba = model.predict(Xva)
+            f1_scores.append(f1_score(yva, proba))
+
+        imp_mean = imp_sum / len(folds)
+        cv_f1_mean = float(np.mean(f1_scores))
+        cv_f1_std = float(np.std(f1_scores, ddof=1)) if len(f1_scores) > 1 else 0.0
+
+        # 2) log before dropping
+        history.append({
+            "step": step,
+            "n_features": len(cols),
+            "features_used": cols.copy(),
+            "dropped_cumulative": dropped_cum.copy(),
+            "cv_f1_mean": cv_f1_mean,
+            "cv_f1_std": cv_f1_std,
+        })
+
+        # 3) update best subset if improved (tie-breaker: fewer features)
+        if (cv_f1_mean > best_cv_f1) or (np.isclose(cv_f1_mean, best_cv_f1) and len(cols) < len(best_features)):
+            best_cv_f1 = cv_f1_mean
+            best_features = cols.copy()
+
+        # 4) decide how many to drop and drop least important
+        k_max = len(cols) - n_features_to_stop
+        k = int(min(n_features_to_drop, k_max))
+        dropped_this = list(imp_mean.sort_values(ascending=True).head(k).index)
+
+        dropped_cum.extend(dropped_this)
+        cols = [c for c in cols if c not in dropped_this]
+        print(f"step {step}: kept {len(cols)} features --> cv_f1_mean: {cv_f1_mean}")
         step += 1
-        
-    return log_dict
+
+    # Final model on full data with the best subset
+    final_model = clone(estimator).fit(X[best_features], y)
+
+    return {
+        "best_features": best_features,
+        "best_cv_f1": best_cv_f1,
+        "history": history,
+        "final_model": final_model,
+    }
 
 
 def boruta_feature_selection(X_train, X_test, y_train):
