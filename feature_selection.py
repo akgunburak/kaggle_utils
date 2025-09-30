@@ -3,13 +3,14 @@ import numpy as np
 from typing import List, Iterable, Tuple, Dict, Any, Optional, Callable
 import pickle
 from sklearn.impute import SimpleImputer
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import f1_score, roc_auc_score, mean_squared_error
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 import lightgbm as lgb
+from sklearn.metrics import f1_score, roc_auc_score, mean_squared_error
 from boruta import BorutaPy
 import ppscore as pps
 from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
 from sklearn.base import clone, is_classifier, is_regressor
+from category_encoders import TargetEncoder
 
 
 def drop_high_null_columns(df, threshold=50, show=False):
@@ -100,36 +101,81 @@ def drop_by_pps(
     return sorted(set(to_drop))
 
 
-def boruta_feature_selection(X_train, X_test, y_train):
-    # Find numerical and categorical columns
-    numerical_cols = X_train.select_dtypes(include=[np.number]).columns
-    categorical_cols = X_train.select_dtypes(exclude=[np.number]).columns
+def boruta_feature_selection(
+    X: pd.DataFrame,
+    y: pd.Series | np.ndarray,
+    *,
+    task: str,                              # must be "classification" or "regression"
+    rf_n_estimators: int = 600,
+    rf_max_depth: Optional[int] = None,
+    rf_random_state: int = 42,
+    rf_class_weight: Optional[str] = None,  # only for classification
+    boruta_verbose: int = 0,
+    boruta_n_estimators: str | int = 'auto'
+) -> Tuple[list[str], Dict[str, Any]] | list[str]:
+    """Boruta feature selection with TargetEncoder for categoricals.
+    
+    Parameters
+    ----------
+    task : str
+        Must be "classification" or "regression".
+    """
 
-    # Fill the numerical data with median
-    if len(numerical_cols) > 0:
-        num_imputer = SimpleImputer(strategy='median')
-        X_train[numerical_cols] = num_imputer.fit_transform(X_train[numerical_cols])
+    X = X.copy()
 
-    # Fill the categorical data with mode
-    if len(categorical_cols) > 0:
-        cat_imputer = SimpleImputer(strategy='most_frequent')
-        X_train[categorical_cols] = cat_imputer.fit_transform(X_train[categorical_cols])
-            
-    X_train, X_test, encoders = encode_categorical(
-    X_train, X_test, y_train,
-    ohe_max_cardinality=0,
-    high_card_strategy="target"  # or "ordinal"
+    # --- split & impute
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    cat_cols = [c for c in X.columns if c not in num_cols]
+
+    num_imputer = SimpleImputer(strategy="median") if num_cols else None
+    if num_imputer:
+        X[num_cols] = num_imputer.fit_transform(X[num_cols])
+
+    cat_imputer = SimpleImputer(strategy="most_frequent") if cat_cols else None
+    if cat_imputer:
+        X[cat_cols] = cat_imputer.fit_transform(X[cat_cols])
+
+    # --- Target encoding
+    enc = None
+    if cat_cols:
+        enc = TargetEncoder(cols=cat_cols, smoothing=0.3)
+        X = enc.fit_transform(X, y)
+
+    # --- choose estimator
+    if task == "classification":
+        rf = RandomForestClassifier(
+            n_estimators=rf_n_estimators,
+            max_depth=rf_max_depth,
+            n_jobs=-1,
+            class_weight=rf_class_weight,
+            random_state=rf_random_state,
+        )
+    elif task == "regression":
+        rf = RandomForestRegressor(
+            n_estimators=rf_n_estimators,
+            max_depth=rf_max_depth,
+            n_jobs=-1,
+            random_state=rf_random_state,
+        )
+    else:
+        raise ValueError("task must be either 'classification' or 'regression'.")
+
+    # --- Boruta
+    boruta = BorutaPy(
+        estimator=rf,
+        n_estimators=boruta_n_estimators,
+        verbose=boruta_verbose,
+        random_state=rf_random_state
     )
-            
-    # define model and boruta objects
-    rf = RandomForestClassifier(n_jobs=-1, class_weight='balanced', max_depth=5)
-    boruta_selector = BorutaPy(rf, n_estimators='auto', verbose=1, random_state=42)
 
-    # training
-    boruta_selector.fit(X_train, y_train)
+    Xb = X.values
+    yb = np.asarray(y).ravel()
+    boruta.fit(Xb, yb)
 
-    # selected features
-    selected_features = X_train.columns[boruta_selector.support_]
+    feature_names = X.columns.tolist()
+    support_mask = boruta.support_.astype(bool)
+    selected_features = [f for f, keep in zip(feature_names, support_mask) if keep]
+
     return selected_features
 
 
