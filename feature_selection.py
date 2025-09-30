@@ -147,16 +147,16 @@ def custom_rfe(X_train, X_test, y_train, y_test, path, n_features_to_drop=5, n_f
 
 
 def boruta_feature_selection(X_train, X_test, y_train):
-    # Sütunları ayır
+    # Find numerical and categorical columns
     numerical_cols = X_train.select_dtypes(include=[np.number]).columns
     categorical_cols = X_train.select_dtypes(exclude=[np.number]).columns
 
-    # Sayısal için median doldurma
+    # Fill the numerical data with median
     if len(numerical_cols) > 0:
         num_imputer = SimpleImputer(strategy='median')
         X_train[numerical_cols] = num_imputer.fit_transform(X_train[numerical_cols])
 
-    # Kategorik için en sık görüleni doldurma
+    # Fill the categorical data with mode
     if len(categorical_cols) > 0:
         cat_imputer = SimpleImputer(strategy='most_frequent')
         X_train[categorical_cols] = cat_imputer.fit_transform(X_train[categorical_cols])
@@ -167,14 +167,14 @@ def boruta_feature_selection(X_train, X_test, y_train):
     high_card_strategy="target"  # or "ordinal"
     )
             
-    # model ve Boruta nesnesi
+    # define model and boruta objects
     rf = RandomForestClassifier(n_jobs=-1, class_weight='balanced', max_depth=5)
     boruta_selector = BorutaPy(rf, n_estimators='auto', verbose=1, random_state=42)
 
-    # eğitimi
+    # training
     boruta_selector.fit(X_train, y_train)
 
-    # seçilen özellikler
+    # selected features
     selected_features = X_train.columns[boruta_selector.support_]
     return selected_features
 
@@ -298,7 +298,7 @@ def adversarial_validation(
         "oof_pred": oof,
         "fold_aucs": fold_aucs,
         "models": models,
-        "features": features,                # <- you can inspect the used features here
+        "features": features,
         "importances": importances,
         "avg_importance": avg_importance,
     }
