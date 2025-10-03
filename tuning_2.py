@@ -31,7 +31,8 @@ def objective_xgb_cv(trial, task, cross_val_splits, X, y, path,
     enc_ohe_max_cardinality = trial.suggest_int("ohe_max_cardinality", 2, 20)
     enc_high_card_strategy  = trial.suggest_categorical("high_card_strategy", ["ordinal", "target"])
     enc_drop_first          = trial.suggest_categorical("drop_first", [False, True])
-
+    keep_original          = trial.suggest_categorical("keep_original", [False, True])
+    
     # ----- XGBoost parameter space -----
     param = {
         'verbosity': 0,
@@ -188,7 +189,8 @@ def objective_lgbm_cv(trial, task, cross_val_splits, X, y, path,
     enc_ohe_max_cardinality = trial.suggest_int("ohe_max_cardinality", 2, 20)
     enc_high_card_strategy  = trial.suggest_categorical("high_card_strategy", ["ordinal", "target"])
     enc_drop_first          = trial.suggest_categorical("drop_first", [False, True])
-                        
+    keep_original          = trial.suggest_categorical("keep_original", [False, True])
+
     # ----- parameter space -----
     param = {
         'verbosity': -1,
@@ -341,6 +343,7 @@ def objective_cb_cv(trial, task, cross_val_splits, X, y, path,
     enc_ohe_max_cardinality = trial.suggest_int("ohe_max_cardinality", 2, 20)
     enc_high_card_strategy  = trial.suggest_categorical("high_card_strategy", ["ordinal", "target"])
     enc_drop_first          = trial.suggest_categorical("drop_first", [False, True])
+    keep_original          = trial.suggest_categorical("keep_original", [False, True])
 
     # ----- parameter space -----
     param = {
