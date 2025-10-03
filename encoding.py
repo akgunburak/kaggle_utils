@@ -12,6 +12,8 @@ def encode_categorical(
     high_card_strategy: str = "ordinal",  # "ordinal" | "target"
     drop_first: bool = False,
     dtype: type = float,
+    keep_original: bool = False,          # <— NEW
+    encoded_suffix: str = "__enc",        # <— NEW: avoids name clashes
 ):
     """
     Encode categorical features with:
@@ -30,6 +32,10 @@ def encode_categorical(
         Drop first level in one-hot to reduce collinearity.
     dtype : type
         Output dtype for encoded columns.
+    keep_original : bool
+        If True, keep the original categorical columns beside their encoded versions.
+    encoded_suffix : str
+        Suffix for high-cardinality encoded column names to avoid collisions.
 
     Returns
     -------
@@ -59,7 +65,12 @@ def encode_categorical(
     Xtr_parts.append(X_train[passthrough])
     Xte_parts.append(X_test[passthrough])
 
-    # --- One-hot encoding ---
+    # Optionally keep original categoricals
+    if keep_original and cat_cols:
+        Xtr_parts.append(X_train[cat_cols])
+        Xte_parts.append(X_test[cat_cols])
+
+    # --- One-hot encoding (low-cardinality) ---
     if ohe_cols:
         ohe = OneHotEncoder(
             sparse_output=False,
@@ -77,7 +88,7 @@ def encode_categorical(
         Xte_parts.append(te_df)
         artifacts["ohe"] = ohe
 
-    # --- High-cardinality encoding ---
+    # --- High-cardinality encoding (ordinal/target) ---
     if high_cols:
         if high_card_strategy == "ordinal":
             ord_enc = OrdinalEncoder(
@@ -87,8 +98,10 @@ def encode_categorical(
             tr = ord_enc.fit_transform(X_train[high_cols])
             te = ord_enc.transform(X_test[high_cols])
 
-            tr_df = pd.DataFrame(tr, index=X_train.index, columns=high_cols).astype(dtype)
-            te_df = pd.DataFrame(te, index=X_test.index, columns=high_cols).astype(dtype)
+            # rename to avoid collision with originals
+            enc_cols = [f"{c}{encoded_suffix}" for c in high_cols]
+            tr_df = pd.DataFrame(tr, index=X_train.index, columns=enc_cols).astype(dtype)
+            te_df = pd.DataFrame(te, index=X_test.index, columns=enc_cols).astype(dtype)
 
             Xtr_parts.append(tr_df)
             Xte_parts.append(te_df)
@@ -101,8 +114,9 @@ def encode_categorical(
             tr = te_enc.fit_transform(X_train[high_cols], y_train)
             te = te_enc.transform(X_test[high_cols])
 
-            tr_df = pd.DataFrame(tr, index=X_train.index, columns=high_cols).astype(dtype)
-            te_df = pd.DataFrame(te, index=X_test.index, columns=high_cols).astype(dtype)
+            enc_cols = [f"{c}{encoded_suffix}" for c in high_cols]
+            tr_df = pd.DataFrame(tr, index=X_train.index, columns=enc_cols).astype(dtype)
+            te_df = pd.DataFrame(te, index=X_test.index, columns=enc_cols).astype(dtype)
 
             Xtr_parts.append(tr_df)
             Xte_parts.append(te_df)
