@@ -1,6 +1,423 @@
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import StratifiedKFold, KFold
+from sklearn.model_selection import StratifiedKFold, KFold, StratifiedShuffleSplit, train_test_split
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.preprocessing import StandardScaler
+from sklearn.utils.validation import check_is_fitted
+from sklearn.metrics import accuracy_score, r2_score, f1_score
+import random
+
+
+# ------------ utility: reproducibility ------------
+def _set_global_seed(seed: int):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+# ------------ dataset wrapper ------------
+class _TabDataset(Dataset):
+    def __init__(self, X, y=None):
+        self.X = np.asarray(X, dtype=np.float32)
+        self.y = None if y is None else np.asarray(y)
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, i):
+        if self.y is None:
+            return self.X[i]
+        return self.X[i], self.y[i]
+
+# ------------ simple flexible MLP ------------
+class _MLP(nn.Module):
+    def __init__(self, in_dim, out_dim, hidden_dim=256, n_layers=2, dropout=0.1, batchnorm=True, activation="relu"):
+        super().__init__()
+        act = {"relu": nn.ReLU(), "gelu": nn.GELU(), "leaky_relu": nn.LeakyReLU(0.1)}[activation]
+        layers = []
+        last = in_dim
+        for _ in range(n_layers):
+            layers += [nn.Linear(last, hidden_dim)]
+            if batchnorm:
+                layers += [nn.BatchNorm1d(hidden_dim)]
+            layers += [act, nn.Dropout(dropout)]
+            last = hidden_dim
+        layers += [nn.Linear(last, out_dim)]
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+# ------------ base trainer (shared) ------------
+def _train_with_early_stopping(
+    model, optimizer, loss_fn,
+    train_loader, val_loader,
+    task, device,
+    epochs, patience, grad_clip=None, trial_reporter=None
+):
+    best_state = None
+    best_val = None
+    no_improve = 0
+    for ep in range(1, epochs + 1):
+        # train
+        model.train()
+        for xb, yb in train_loader:
+            xb = xb.to(device)
+            if task == "regression":
+                yb = torch.as_tensor(yb, dtype=torch.float32, device=device)
+            elif task == "binary":
+                yb = torch.as_tensor(yb, dtype=torch.float32, device=device)
+            else:
+                yb = torch.as_tensor(yb, dtype=torch.long, device=device)
+
+            logits = model(xb)
+            if task in ("binary", "regression"):
+                logits = logits.squeeze(-1)  # (N,1)->(N,)
+            loss = loss_fn(logits, yb)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            if grad_clip is not None:
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
+
+        # validate
+        model.eval()
+        vals = []
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb = xb.to(device)
+                if task in ("binary", "regression"):
+                    yb = torch.as_tensor(yb, dtype=torch.float32, device=device)
+                else:
+                    yb = torch.as_tensor(yb, dtype=torch.long, device=device)
+                logits = model(xb)
+                if task in ("binary", "regression"):
+                    logits = logits.squeeze(-1)
+                vloss = loss_fn(logits, yb)
+                vals.append(vloss.item())
+        mean_val = float(np.mean(vals))
+
+        # optional reporting (e.g., for Optuna pruning)
+        if trial_reporter is not None:
+            trial_reporter(mean_val, step=ep)
+
+        if (best_val is None) or (mean_val < best_val - 1e-8):
+            best_val = mean_val
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            no_improve = 0
+        else:
+            no_improve += 1
+            if no_improve >= patience:
+                break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+def _predict_logits(model, loader, task, device):
+    model.eval()
+    outs = []
+    with torch.no_grad():
+        for xb in loader:
+            xb = xb.to(device)
+            logits = model(xb)
+            if task in ("binary", "regression"):
+                logits = logits.squeeze(-1)
+            outs.append(logits.detach().cpu().numpy())
+    return np.concatenate(outs, axis=0)
+
+# =========================================================
+#                  Classifier Estimator
+# =========================================================
+class TorchMLPClassifier(BaseEstimator, ClassifierMixin):
+    """
+    sklearn-compatible PyTorch MLP classifier.
+    - Supports binary and multiclass.
+    - Works with Pipeline, cross_val_score, GridSearchCV, Optuna, etc.
+    """
+
+    def __init__(
+        self,
+        hidden_dim=256,
+        n_layers=2,
+        dropout=0.1,
+        batchnorm=True,
+        activation="relu",           # "relu" | "gelu" | "leaky_relu"
+        optimizer="adamw",           # "adamw" | "adam"
+        learning_rate=1e-3,
+        weight_decay=1e-4,
+        batch_size=256,
+        epochs=200,
+        patience=20,
+        grad_clip=None,
+        val_size=0.1,
+        scale_features=False,        # internal StandardScaler
+        optimize_threshold=False,    # binary: tune decision threshold on val set
+        threshold_metric="f1",       # {"f1","accuracy"} for tuning
+        device="auto",               # "auto" | "cpu" | "cuda"
+        random_state=42,
+    ):
+        self.hidden_dim = hidden_dim
+        self.n_layers = n_layers
+        self.dropout = dropout
+        self.batchnorm = batchnorm
+        self.activation = activation
+        self.optimizer = optimizer
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.batch_size = batch_size
+        self.epochs = epochs
+        self.patience = patience
+        self.grad_clip = grad_clip
+        self.val_size = val_size
+        self.scale_features = scale_features
+        self.optimize_threshold = optimize_threshold
+        self.threshold_metric = threshold_metric
+        self.device = device
+        self.random_state = random_state
+
+    # ---- sklearn API ----
+    def fit(self, X, y):
+        _set_global_seed(self.random_state)
+
+        X = np.asarray(X)
+        y = np.asarray(y)
+        self.classes_, y_idx = np.unique(y, return_inverse=True)
+        n_classes = len(self.classes_)
+        self.task_ = "binary" if n_classes == 2 else "multiclass"
+
+        # split tiny val set for early stopping / threshold tuning
+        if self.task_ == "binary" or self.task_ == "multiclass":
+            splitter = StratifiedShuffleSplit(n_splits=1, test_size=self.val_size, random_state=self.random_state)
+            tr_idx, va_idx = next(splitter.split(X, y_idx))
+        else:
+            raise ValueError("Classifier received non-class targets.")
+
+        X_tr, y_tr = X[tr_idx], y_idx[tr_idx]
+        X_va, y_va = X[va_idx], y_idx[va_idx]
+
+        # scaling (internal)
+        self.scaler_ = None
+        if self.scale_features:
+            self.scaler_ = StandardScaler()
+            X_tr = self.scaler_.fit_transform(X_tr)
+            X_va = self.scaler_.transform(X_va)
+
+        # build model
+        in_dim = X.shape[1]
+        out_dim = 1 if self.task_ == "binary" else n_classes
+        self.model_ = _MLP(in_dim, out_dim,
+                           hidden_dim=self.hidden_dim,
+                           n_layers=self.n_layers,
+                           dropout=self.dropout,
+                           batchnorm=self.batchnorm,
+                           activation=self.activation)
+
+        dev = (torch.device("cuda") if (self.device == "auto" and torch.cuda.is_available())
+               else torch.device(self.device if self.device != "auto" else "cpu"))
+        self.device_ = dev
+        self.model_.to(self.device_)
+
+        # losses & optimizer
+        if self.task_ == "binary":
+            loss_fn = nn.BCEWithLogitsLoss()
+        else:
+            loss_fn = nn.CrossEntropyLoss()
+
+        opt = (torch.optim.AdamW if self.optimizer == "adamw" else torch.optim.Adam)(
+            self.model_.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
+        )
+
+        # loaders
+        train_dl = DataLoader(_TabDataset(X_tr, y_tr), batch_size=self.batch_size, shuffle=True)
+        val_dl   = DataLoader(_TabDataset(X_va, y_va), batch_size=self.batch_size, shuffle=False)
+
+        # train
+        _train_with_early_stopping(
+            self.model_, opt, loss_fn, train_dl, val_dl,
+            task=self.task_, device=self.device_,
+            epochs=self.epochs, patience=self.patience, grad_clip=self.grad_clip
+        )
+
+        # pick threshold if binary
+        self.threshold_ = 0.5
+        if self.task_ == "binary" and self.optimize_threshold:
+            # compute probs on val and tune threshold
+            X_val_infer = X_va
+            val_loader = DataLoader(_TabDataset(X_val_infer), batch_size=1024, shuffle=False)
+            logits = _predict_logits(self.model_, val_loader, self.task_, self.device_)
+            probs = 1.0 / (1.0 + np.exp(-logits))
+            grid = np.linspace(0.05, 0.95, 19)
+            best_thr, best_val = 0.5, -np.inf
+            for thr in grid:
+                pred = (probs >= thr).astype(int)
+                if self.threshold_metric == "f1":
+                    val = f1_score(y_va, pred, zero_division=0)
+                else:
+                    val = accuracy_score(y_va, pred)
+                if val > best_val:
+                    best_val, best_thr = val, thr
+            self.threshold_ = float(best_thr)
+
+        # remember training artifacts for inference
+        self.in_dim_ = in_dim
+        self.n_classes_ = n_classes
+        return self
+
+    def _transform_X(self, X):
+        X = np.asarray(X, dtype=np.float32)
+        if hasattr(self, "scaler_") and self.scaler_ is not None:
+            X = self.scaler_.transform(X)
+        return X
+
+    def predict_proba(self, X):
+        check_is_fitted(self, "model_")
+        X = self._transform_X(X)
+        loader = DataLoader(_TabDataset(X), batch_size=1024, shuffle=False)
+        logits = _predict_logits(self.model_, loader, self.task_, self.device_)
+        if self.task_ == "binary":
+            p1 = 1.0 / (1.0 + np.exp(-logits))
+            return np.vstack([1 - p1, p1]).T  # shape (N,2)
+        else:
+            # softmax
+            z = logits
+            z = z - z.max(axis=1, keepdims=True)
+            e = np.exp(z)
+            return e / e.sum(axis=1, keepdims=True)
+
+    def predict(self, X):
+        proba = self.predict_proba(X)
+        if self.task_ == "binary":
+            thr = getattr(self, "threshold_", 0.5)
+            yhat = (proba[:, 1] >= thr).astype(int)
+            return self.classes_[yhat]
+        else:
+            yhat = proba.argmax(axis=1)
+            return self.classes_[yhat]
+
+    def score(self, X, y):
+        # default sklearn behavior: accuracy for classifiers
+        y_pred = self.predict(X)
+        return accuracy_score(y, y_pred)
+
+# =========================================================
+#                  Regressor Estimator
+# =========================================================
+class TorchMLPRegressor(BaseEstimator, RegressorMixin):
+    """
+    sklearn-compatible PyTorch MLP regressor.
+    - Works with Pipeline, cross_val_score, GridSearchCV, Optuna, etc.
+    """
+
+    def __init__(
+        self,
+        hidden_dim=256,
+        n_layers=2,
+        dropout=0.1,
+        batchnorm=True,
+        activation="relu",
+        optimizer="adamw",
+        learning_rate=1e-3,
+        weight_decay=1e-4,
+        batch_size=256,
+        epochs=200,
+        patience=20,
+        grad_clip=None,
+        val_size=0.1,
+        scale_features=False,
+        device="auto",
+        random_state=42,
+        loss="mse"  # "mse" or "mae"
+    ):
+        self.hidden_dim = hidden_dim
+        self.n_layers = n_layers
+        self.dropout = dropout
+        self.batchnorm = batchnorm
+        self.activation = activation
+        self.optimizer = optimizer
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.batch_size = batch_size
+        self.epochs = epochs
+        self.patience = patience
+        self.grad_clip = grad_clip
+        self.val_size = val_size
+        self.scale_features = scale_features
+        self.device = device
+        self.random_state = random_state
+        self.loss = loss
+
+    def fit(self, X, y):
+        _set_global_seed(self.random_state)
+
+        X = np.asarray(X)
+        y = np.asarray(y)
+
+        # small val split for early stopping
+        tr_idx, va_idx = train_test_split(
+            np.arange(len(X)), test_size=self.val_size, random_state=self.random_state
+        )
+        X_tr, y_tr = X[tr_idx], y[tr_idx]
+        X_va, y_va = X[va_idx], y[va_idx]
+
+        # scaling
+        self.scaler_ = None
+        if self.scale_features:
+            self.scaler_ = StandardScaler()
+            X_tr = self.scaler_.fit_transform(X_tr)
+            X_va = self.scaler_.transform(X_va)
+
+        in_dim = X.shape[1]
+        out_dim = 1
+        self.model_ = _MLP(in_dim, out_dim,
+                           hidden_dim=self.hidden_dim,
+                           n_layers=self.n_layers,
+                           dropout=self.dropout,
+                           batchnorm=self.batchnorm,
+                           activation=self.activation)
+
+        dev = (torch.device("cuda") if (self.device == "auto" and torch.cuda.is_available())
+               else torch.device(self.device if self.device != "auto" else "cpu"))
+        self.device_ = dev
+        self.model_.to(self.device_)
+
+        loss_fn = nn.MSELoss() if self.loss == "mse" else nn.L1Loss()
+        opt = (torch.optim.AdamW if self.optimizer == "adamw" else torch.optim.Adam)(
+            self.model_.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
+        )
+
+        train_dl = DataLoader(_TabDataset(X_tr, y_tr), batch_size=self.batch_size, shuffle=True)
+        val_dl   = DataLoader(_TabDataset(X_va, y_va), batch_size=self.batch_size, shuffle=False)
+
+        _train_with_early_stopping(
+            self.model_, opt, loss_fn, train_dl, val_dl,
+            task="regression", device=self.device_,
+            epochs=self.epochs, patience=self.patience, grad_clip=self.grad_clip
+        )
+
+        self.in_dim_ = in_dim
+        return self
+
+    def _transform_X(self, X):
+        X = np.asarray(X, dtype=np.float32)
+        if hasattr(self, "scaler_") and self.scaler_ is not None:
+            X = self.scaler_.transform(X)
+        return X
+
+    def predict(self, X):
+        check_is_fitted(self, "model_")
+        X = self._transform_X(X)
+        loader = DataLoader(_TabDataset(X), batch_size=1024, shuffle=False)
+        preds = _predict_logits(self.model_, loader, "regression", self.device_)
+        return preds.reshape(-1)
+
+    def score(self, X, y):
+        # default sklearn behavior: R^2
+        y_pred = self.predict(X)
+        return r2_score(y, y_pred)
 
 
 def get_oof_predictions(
