@@ -79,7 +79,7 @@ def objective_xgb_cv(trial, task, cross_val_splits, X, y, path,
         # XGBoost prefers numeric; encoding has made everything numeric already.
         # Keep enable_categorical=False to avoid unexpected handling.
         dtrain = xgb.DMatrix(X_train_cv, label=y_train_cv, enable_categorical=False)
-        dtest  = xgb.DMatrix(X_val_cv,   label=y_val,     enable_categorical=False)
+        dtest  = xgb.DMatrix(X_val,   label=y_val,     enable_categorical=False)
 
         bst = xgb.train(param, dtrain, evals=[(dtest, "test")], verbose_eval=False)
         preds = bst.predict(dtest)
