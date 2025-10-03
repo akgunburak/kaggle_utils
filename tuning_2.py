@@ -78,8 +78,8 @@ def objective_xgb_cv(trial, task, cross_val_splits, X, y, path,
 
         # XGBoost prefers numeric; encoding has made everything numeric already.
         # Keep enable_categorical=False to avoid unexpected handling.
-        dtrain = xgb.DMatrix(X_train_enc, label=y_train_cv, enable_categorical=False)
-        dtest  = xgb.DMatrix(X_val_enc,   label=y_val,     enable_categorical=False)
+        dtrain = xgb.DMatrix(X_train_cv, label=y_train_cv, enable_categorical=False)
+        dtest  = xgb.DMatrix(X_val_cv,   label=y_val,     enable_categorical=False)
 
         bst = xgb.train(param, dtrain, evals=[(dtest, "test")], verbose_eval=False)
         preds = bst.predict(dtest)
@@ -676,7 +676,7 @@ def objective_torchmlp_cv(trial, task, cross_val_splits, X, y, path,
         y_train_cv, y_val = _ix(y, train_idx_cv), _ix(y, val_idx_cv)
 
         # ---- encode categoricals per fold (NO external scaling; model will scale internally) ----
-        Xtr_enc, Xva_enc, enc_artifacts = encode_categorical(
+        Xtr_cv, Xva_cv, enc_artifacts = encode_categorical(
             X_train_cv, X_val, y_train=y_train_cv if high_card_strategy == "target" else None,
             ohe_max_cardinality=ohe_max_cardinality,
             high_card_strategy=high_card_strategy,
@@ -684,7 +684,7 @@ def objective_torchmlp_cv(trial, task, cross_val_splits, X, y, path,
             dtype=float
         )
 
-        feature_names = list(Xtr_enc.columns)
+        feature_names = list(Xtr_cv.columns)
 
         # ---- build and fit estimator (internal scaler kept ON) ----
         if task in ('binary', 'multiclass'):
@@ -708,15 +708,15 @@ def objective_torchmlp_cv(trial, task, cross_val_splits, X, y, path,
                 device="auto",
                 random_state=2020
             )
-            clf.fit(Xtr_enc, y_train_cv)
+            clf.fit(Xtr_cv, y_train_cv)
 
             # predictions & metric
             if task == 'binary':
                 if metric == "auc":
-                    proba = clf.predict_proba(Xva_enc)[:, 1]
+                    proba = clf.predict_proba(Xva_cv)[:, 1]
                     fold_score = roc_auc_score(y_val, proba)
                 else:
-                    pred_labels = clf.predict(Xva_enc)
+                    pred_labels = clf.predict(Xva_cv)
                     if metric == "f1":
                         fold_score = f1_score(y_val, pred_labels, zero_division=0)
                     elif metric == "accuracy":
@@ -731,14 +731,14 @@ def objective_torchmlp_cv(trial, task, cross_val_splits, X, y, path,
                 # logs
                 y_true_1 = pd.Series(y_val).value_counts(normalize=True).get(1, 0.0)
                 y_true_0 = pd.Series(y_val).value_counts(normalize=True).get(0, 0.0)
-                pred_labels_for_log = clf.predict(Xva_enc)
+                pred_labels_for_log = clf.predict(Xva_cv)
                 y_pred_1 = pd.Series(pred_labels_for_log).value_counts(normalize=True).get(1, 0.0)
                 y_pred_0 = pd.Series(pred_labels_for_log).value_counts(normalize=True).get(0, 0.0)
 
             else:  # multiclass
                 if metric != "accuracy":
                     raise ValueError("Only 'accuracy' supported for multiclass by default")
-                pred_labels = clf.predict(Xva_enc)
+                pred_labels = clf.predict(Xva_cv)
                 fold_score = accuracy_score(y_val, pred_labels)
 
                 y_true_dist = pd.Series(y_val).value_counts(normalize=True).to_dict()
@@ -781,8 +781,8 @@ def objective_torchmlp_cv(trial, task, cross_val_splits, X, y, path,
                 random_state=2020,
                 loss="mse" if metric == "rmse" else "mae"
             )
-            reg.fit(Xtr_enc, y_train_cv)
-            preds = reg.predict(Xva_enc)
+            reg.fit(Xtr_cv, y_train_cv)
+            preds = reg.predict(Xva_cv)
 
             if metric == "rmse":
                 fold_score = float(np.sqrt(mean_squared_error(y_val, preds)))
