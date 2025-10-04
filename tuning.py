@@ -628,15 +628,15 @@ def objective_torchmlp_cv(trial, task, cross_val_splits, X, y, path,
 
     # ----------------- hyperparameter space (NN) -----------------
     hidden_dim    = trial.suggest_int('hidden_dim', 64, 1024, log=True)
-    n_layers      = trial.suggest_int('n_layers', 1, 5)
+    n_layers      = trial.suggest_int('n_layers', 1, 6)
     dropout       = trial.suggest_float('dropout', 0.0, 0.6)
     batchnorm     = trial.suggest_categorical('batchnorm', [True, False])
     activation    = trial.suggest_categorical('activation', ['relu', 'gelu', 'leaky_relu'])
     optimizer     = trial.suggest_categorical('optimizer', ['adamw', 'adam'])
-    learning_rate = trial.suggest_float('learning_rate', 1e-4, 3e-3, log=True)
-    weight_decay  = trial.suggest_float('weight_decay', 1e-8, 1e-3, log=True)
+    learning_rate = trial.suggest_float('learning_rate', 1e-4, 3e-2, log=True)
+    weight_decay  = trial.suggest_float('weight_decay', 1e-8, 1e-2, log=True)
     batch_size    = trial.suggest_categorical('batch_size', [64, 128, 256, 512, 1024])
-    epochs        = trial.suggest_int('epochs', 50, 400)
+    epochs        = trial.suggest_int('epochs', 30, 400)
     patience      = trial.suggest_int('patience', 10, 50)
     use_grad_clip = trial.suggest_categorical('use_grad_clip', [True, False])
     grad_clip     = trial.suggest_float('grad_clip', 0.5, 5.0) if use_grad_clip else None
