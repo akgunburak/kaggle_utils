@@ -602,14 +602,14 @@ def get_oof_predictions(
             valid_hard_votes = np.zeros((n_valid, n_classes))
             for preds in valid_hard_preds_list:
                 for c in range(n_classes):
-                    valid_hard_votes[:, c] += (preds == c).astype(float)
+                    valid_hard_votes[:, c] += (preds == c).reshape(-1).astype(float)
             valid_hard_prop = valid_hard_votes / len(valid_hard_preds_list)
             oof_train[valid_idx, hard_slice] = valid_hard_prop
 
             test_hard_votes = np.zeros((n_test, n_classes))
             for preds in test_hard_preds_list:
                 for c in range(n_classes):
-                    test_hard_votes[:, c] += (preds == c).astype(float)
+                    test_hard_votes[:, c] += (preds == c).reshape(-1).astype(float)
             test_hard_prop = test_hard_votes / len(test_hard_preds_list)
             oof_test[:, hard_slice] += test_hard_prop
 
@@ -640,13 +640,13 @@ def get_oof_predictions(
                 valid_wvotes = np.zeros((n_valid, n_classes))
                 for wj, preds in zip(w, valid_hard_preds_list):
                     for c in range(n_classes):
-                        valid_wvotes[:, c] += wj * (preds == c).astype(float)
+                        valid_wvotes[:, c] += wj * (preds == c).reshape(-1).astype(float)
                 oof_train[valid_idx, whard_slice] = valid_wvotes  # weights normalized already
 
                 test_wvotes = np.zeros((n_test, n_classes))
                 for wj, preds in zip(w, test_hard_preds_list):
                     for c in range(n_classes):
-                        test_wvotes[:, c] += wj * (preds == c).astype(float)
+                        test_wvotes[:, c] += wj * (preds == c).reshape(-1).astype(float)
                 oof_test[:, whard_slice] += test_wvotes
 
             # Ensemble feature scores (based on hard labels)
