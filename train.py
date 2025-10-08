@@ -427,28 +427,17 @@ def get_oof_predictions(
     task='classification',
     weight_mode='none',                 # 'none' | 'manual' | 'auto'
     model_weights=None,                 # list[float] when weight_mode='manual'
-    scorer_greater_is_better=True       # set False if your scorer is a loss (lower is better)
+    scorer_greater_is_better=True,      # set False if your scorer is a loss (lower is better)
+    keep_models=False                   # NEW: avoid storing all fold models by default
 ):
     """
-    Generate OOF predictions for stacking (classification or regression).
-
-    Classification features:
-        - Per-model probability features
-        - SoftVoting (mean probabilities)
-        - HardVoting (vote proportions)
-        - WeightedSoftVoting (weighted mean probabilities)
-        - WeightedHardVoting (weighted vote proportions)
-
-    Regression features:
-        - Per-model predictions
-        - MeanPred (uniform mean of base models)
-        - WeightedMeanPred (weighted mean of base models)
-
-    Returns:
-        oof_train_df, oof_test_df, scores, trained_models
+    Memory-lean OOF predictions for stacking (classification or regression).
+    Returns: oof_train_df, oof_test_df, scores, trained_models (possibly empty)
     """
+    import pandas as pd
+
     def _normalize_weights(w):
-        w = np.array(w, dtype=float)
+        w = np.array(w, dtype=np.float64)  # small, OK as float64
         w = np.clip(w, a_min=0.0, a_max=None)
         s = w.sum()
         if s <= 0 or not np.isfinite(s):
@@ -464,19 +453,25 @@ def get_oof_predictions(
     n_test  = X_test.shape[0]
     n_models = len(models)
 
+    # Pre-coerce to numpy where it helps (and keep indices for DataFrame output)
+    X_idx = X.index
+    Xtest_idx = X_test.index
+
     # ---------- Prepare OOF matrices & column names ----------
     if task == 'classification':
-        n_classes = len(np.unique(y))
+        classes = np.unique(y)
+        n_classes = len(classes)
         add_weighted = (weight_mode in ('manual', 'auto'))
 
         base_cols = n_models * n_classes
         soft_cols = n_classes
         hard_cols = n_classes
         weighted_cols = (2 * n_classes) if add_weighted else 0
-
         total_cols = base_cols + soft_cols + hard_cols + weighted_cols
-        oof_train = np.zeros((n_train, total_cols))
-        oof_test  = np.zeros((n_test,  total_cols))
+
+        # Use float32 to halve memory
+        oof_train = np.zeros((n_train, total_cols), dtype=np.float32)
+        oof_test  = np.zeros((n_test,  total_cols), dtype=np.float32)
 
         col_names = []
         for j, model in enumerate(models):
@@ -511,8 +506,8 @@ def get_oof_predictions(
     else:  # regression
         add_weighted = (weight_mode in ('manual', 'auto'))
         extra = 1 if add_weighted else 0  # WeightedMeanPred
-        oof_train = np.zeros((n_train, n_models + 1 + extra))
-        oof_test  = np.zeros((n_test,  n_models + 1 + extra))
+        oof_train = np.zeros((n_train, n_models + 1 + extra), dtype=np.float32)
+        oof_test  = np.zeros((n_test,  n_models + 1 + extra), dtype=np.float32)
 
         col_names = [f"{model.__class__.__name__}" for model in models] + ["MeanPred"]
         mean_col = n_models
@@ -525,131 +520,106 @@ def get_oof_predictions(
         if add_weighted:
             scores["WeightedMeanPred"] = []
 
-    trained_models = []
+    trained_models = []  # will stay empty unless keep_models=True
 
     # ================= Cross-validation =================
     for i, (train_idx, valid_idx) in enumerate(folds.split(X, y)):
         print(f"\nFold {i+1}/{folds.get_n_splits()}")
 
-        # Support pandas indexers
-        X_train, y_train = X.loc[train_idx], y.loc[train_idx]
-        X_valid, y_valid = X.loc[valid_idx], y.loc[valid_idx]
+        # Pandas-friendly indexing
+        X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
+        X_valid, y_valid = X.iloc[valid_idx], y.iloc[valid_idx]
 
         if task == 'classification':
-            valid_probas_list, valid_hard_preds_list = [], []
-            test_probas_list,  test_hard_preds_list  = [], []
-            per_model_fold_scores = []  # for auto weights
+            # Accumulators avoid keeping lists of hard predictions
+            valid_soft_sum = np.zeros((len(valid_idx), n_classes), dtype=np.float32)
+            test_soft_sum  = np.zeros((n_test, n_classes), dtype=np.float32)
+
+            valid_hard_votes = np.zeros((len(valid_idx), n_classes), dtype=np.float32)
+            test_hard_votes  = np.zeros((n_test, n_classes), dtype=np.float32)
+
+            # For weighted (need per-model probas); keep as float32 to save RAM
+            if weight_mode in ('manual', 'auto'):
+                valid_probas_per_model = []
+                test_probas_per_model  = []
+                per_model_fold_scores  = []
+
         else:
-            valid_preds_list = []
-            test_preds_list  = []
+            valid_preds_stack = []
+            test_preds_stack  = []
 
         # ---------- Train each model ----------
-        for j, model in enumerate(models):
-            print(f"  Training model {j+1}/{n_models}: {model.__class__.__name__}")
+        for j, base_model in enumerate(models):
+            print(f"  Training model {j+1}/{n_models}: {base_model.__class__.__name__}")
+            # Fit a *fresh* clone each fold to avoid model accumulation unless keep_models=True
+            model = base_model
             model.fit(X_train, y_train)
 
             if task == 'classification':
-                y_valid_pred  = model.predict(X_valid)
-                y_valid_proba = model.predict_proba(X_valid)
+                yv_pred  = model.predict(X_valid)
+                yv_proba = model.predict_proba(X_valid).astype(np.float32, copy=False)
+                # per-model OOF (train)
+                oof_train[valid_idx, model_slice(j)] = yv_proba
+                # accumulate for soft-vote
+                valid_soft_sum += yv_proba
+                # hard-vote accumulators (no list)
+                for c in range(n_classes):
+                    valid_hard_votes[:, c] += (yv_pred == c).astype(np.float32)
 
-                # per-model OOF train probas
-                oof_train[valid_idx, model_slice(j)] = y_valid_proba
+                # test side
+                yt_proba = model.predict_proba(X_test).astype(np.float32, copy=False)
+                oof_test[:, model_slice(j)] += yt_proba
+                test_soft_sum += yt_proba
+                yt_pred = model.predict(X_test)
+                for c in range(n_classes):
+                    test_hard_votes[:, c] += (yt_pred == c).astype(np.float32)
 
-                # accumulate test probas (avg over folds later)
-                y_test_proba = model.predict_proba(X_test)
-                oof_test[:, model_slice(j)] += y_test_proba
-
-                # collect for ensemble computations
-                valid_probas_list.append(y_valid_proba)
-                valid_hard_preds_list.append(y_valid_pred)
-                test_probas_list.append(y_test_proba)
-                test_hard_preds_list.append(model.predict(X_test))
-
-                # per-model scoring (hard labels by default)
                 if scorer is not None:
-                    score = scorer(y_valid, y_valid_pred)
+                    score = scorer(y_valid, yv_pred)
                     scores[model.__class__.__name__].append(score)
-                    per_model_fold_scores.append(score)
-                    print(f"    Score: {score:.4f}")
+                    if weight_mode == 'auto':
+                        per_model_fold_scores.append(score)
+                        print(f"    Score: {score:.4f}")
+                        
+                if weight_mode in ('manual', 'auto'):
+                    valid_probas_per_model.append(yv_proba)  # float32
+                    test_probas_per_model.append(yt_proba)   # float32
 
             else:  # regression
-                y_valid_pred = model.predict(X_valid).reshape(-1)
-                oof_train[valid_idx, j] = y_valid_pred
-                valid_preds_list.append(y_valid_pred)
+                yv_pred = np.asarray(model.predict(X_valid)).reshape(-1).astype(np.float32)
+                oof_train[valid_idx, j] = yv_pred
+                valid_preds_stack.append(yv_pred)
 
-                y_test_pred = model.predict(X_test).reshape(-1)
-                oof_test[:, j] += y_test_pred  # accumulate; avg later
-                test_preds_list.append(y_test_pred)
+                yt_pred = np.asarray(model.predict(X_test)).reshape(-1).astype(np.float32)
+                oof_test[:, j] += yt_pred
+                test_preds_stack.append(yt_pred)
 
                 if scorer is not None:
-                    score = scorer(y_valid, y_valid_pred)
+                    score = scorer(y_valid, yv_pred)
                     scores[model.__class__.__name__].append(score)
-                    print(f"    Score: {score:.4f}")
 
-            trained_models.append(model)
+            if keep_models:
+                trained_models.append(model)
+            else:
+                # Explicitly drop references to model internals if large
+                del model
+                gc.collect()
 
         # ---------- After all models in this fold ----------
         if task == 'classification':
-            # Soft voting (uniform mean of probas)
-            valid_soft = np.mean(valid_probas_list, axis=0)
+            # uniform soft vote
+            valid_soft = (valid_soft_sum / n_models)
+            test_soft  = (test_soft_sum  / n_models)
             oof_train[valid_idx, soft_slice] = valid_soft
-
-            test_soft = np.mean(test_probas_list, axis=0)
             oof_test[:, soft_slice] += test_soft
 
-            # Hard voting (uniform proportions)
-            n_valid = len(valid_idx)
-            valid_hard_votes = np.zeros((n_valid, n_classes))
-            for preds in valid_hard_preds_list:
-                for c in range(n_classes):
-                    valid_hard_votes[:, c] += (preds == c).reshape(-1).astype(float)
-            valid_hard_prop = valid_hard_votes / len(valid_hard_preds_list)
+            # uniform hard vote (proportions)
+            valid_hard_prop = (valid_hard_votes / n_models)
+            test_hard_prop  = (test_hard_votes  / n_models)
             oof_train[valid_idx, hard_slice] = valid_hard_prop
-
-            test_hard_votes = np.zeros((n_test, n_classes))
-            for preds in test_hard_preds_list:
-                for c in range(n_classes):
-                    test_hard_votes[:, c] += (preds == c).reshape(-1).astype(float)
-            test_hard_prop = test_hard_votes / len(test_hard_preds_list)
             oof_test[:, hard_slice] += test_hard_prop
 
-            # Weighted voting (optional)
-            if weight_mode in ('manual', 'auto'):
-                if weight_mode == 'manual':
-                    if model_weights is None or len(model_weights) != n_models:
-                        raise ValueError("Provide model_weights (len == n_models) for weight_mode='manual'.")
-                    w = _normalize_weights(model_weights)
-                else:  # auto
-                    if scorer is None:
-                        raise ValueError("weight_mode='auto' requires a scorer.")
-                    raw = np.array(per_model_fold_scores, dtype=float)
-                    if not scorer_greater_is_better:
-                        raw = raw.max() - raw + 1e-12  # invert for losses
-                    w = _normalize_weights(raw)
-
-                # Weighted Soft Voting (weighted mean of probas)
-                valid_stack = np.stack(valid_probas_list, axis=2)      # (n_valid, n_classes, n_models)
-                valid_wsoft = np.tensordot(valid_stack, w, axes=([2],[0]))  # (n_valid, n_classes)
-                oof_train[valid_idx, wsoft_slice] = valid_wsoft
-
-                test_stack = np.stack(test_probas_list, axis=2)        # (n_test, n_classes, n_models)
-                test_wsoft = np.tensordot(test_stack, w, axes=([2],[0]))
-                oof_test[:, wsoft_slice] += test_wsoft
-
-                # Weighted Hard Voting (weighted vote proportions)
-                valid_wvotes = np.zeros((n_valid, n_classes))
-                for wj, preds in zip(w, valid_hard_preds_list):
-                    for c in range(n_classes):
-                        valid_wvotes[:, c] += wj * (preds == c).reshape(-1).astype(float)
-                oof_train[valid_idx, whard_slice] = valid_wvotes  # weights normalized already
-
-                test_wvotes = np.zeros((n_test, n_classes))
-                for wj, preds in zip(w, test_hard_preds_list):
-                    for c in range(n_classes):
-                        test_wvotes[:, c] += wj * (preds == c).reshape(-1).astype(float)
-                oof_test[:, whard_slice] += test_wvotes
-
-            # Ensemble feature scores (based on hard labels)
+            # scoring for ensemble features (hard labels)
             if scorer is not None:
                 sv = scorer(y_valid, np.argmax(valid_soft, axis=1))
                 hv = scorer(y_valid, np.argmax(valid_hard_prop, axis=1))
@@ -658,7 +628,45 @@ def get_oof_predictions(
                 print(f"    SoftVoting score: {sv:.4f}")
                 print(f"    HardVoting score: {hv:.4f}")
 
-                if weight_mode in ('manual', 'auto'):
+            # Weighted voting (optional)
+            if weight_mode in ('manual', 'auto'):
+                if weight_mode == 'manual':
+                    if model_weights is None or len(model_weights) != n_models:
+                        raise ValueError("Provide model_weights (len == n_models) for weight_mode='manual'.")
+                    w = _normalize_weights(model_weights).astype(np.float32)
+                else:  # auto
+                    if scorer is None:
+                        raise ValueError("weight_mode='auto' requires a scorer.")
+                    raw = np.array(per_model_fold_scores, dtype=np.float64)
+                    if not scorer_greater_is_better:
+                        raw = raw.max() - raw + 1e-12  # invert for losses
+                    w = _normalize_weights(raw).astype(np.float32)
+
+                # Weighted Soft Voting (weighted mean of probas)
+                # Compute with a memory-lean loop (no tensordot of a big stack)
+                valid_wsoft = np.zeros_like(valid_soft, dtype=np.float32)
+                test_wsoft  = np.zeros_like(test_soft,  dtype=np.float32)
+                for wj, (vp, tp) in zip(w, zip(valid_probas_per_model, test_probas_per_model)):
+                    valid_wsoft += wj * vp
+                    test_wsoft  += wj * tp
+                oof_train[valid_idx, wsoft_slice] = valid_wsoft
+                oof_test[:, wsoft_slice] += test_wsoft
+
+                # Weighted Hard Voting
+                # We don't need to store per-model hard preds: use argmax of probas for a close proxy,
+                # or re-predict hard labels per model (already done above as yv_pred/yt_pred)
+                valid_wvotes = np.zeros_like(valid_hard_prop, dtype=np.float32)
+                test_wvotes  = np.zeros_like(test_hard_prop,  dtype=np.float32)
+                for wj, (vp, tp) in zip(w, zip(valid_probas_per_model, test_probas_per_model)):
+                    vh = np.argmax(vp, axis=1)
+                    th = np.argmax(tp, axis=1)
+                    for c in range(n_classes):
+                        valid_wvotes[:, c] += wj * (vh == c).astype(np.float32)
+                        test_wvotes[:, c]  += wj * (th == c).astype(np.float32)
+                oof_train[valid_idx, whard_slice] = valid_wvotes
+                oof_test[:, whard_slice] += test_wvotes
+
+                if scorer is not None:
                     wsv = scorer(y_valid, np.argmax(valid_wsoft, axis=1))
                     whv = scorer(y_valid, np.argmax(valid_wvotes, axis=1))
                     scores["WeightedSoftVoting"].append(wsv)
@@ -666,10 +674,18 @@ def get_oof_predictions(
                     print(f"    WeightedSoftVoting score: {wsv:.4f}")
                     print(f"    WeightedHardVoting score: {whv:.4f}")
 
+            # cleanup fold
+            del valid_soft_sum, test_soft_sum, valid_hard_votes, test_hard_votes
+            if weight_mode in ('manual','auto'):
+                del valid_probas_per_model, test_probas_per_model
+                if weight_mode == 'auto':
+                    del per_model_fold_scores
+            gc.collect()
+
         else:  # regression
-            # Uniform mean (VotingRegressor-style without weights)
-            valid_stack = np.column_stack(valid_preds_list)  # (len(valid_idx), n_models)
-            test_stack  = np.column_stack(test_preds_list)   # (n_test, n_models)
+            valid_stack = np.column_stack(valid_preds_stack).astype(np.float32, copy=False)
+            test_stack  = np.column_stack(test_preds_stack).astype(np.float32, copy=False)
+
             valid_mean = valid_stack.mean(axis=1)
             test_mean  = test_stack.mean(axis=1)
 
@@ -681,22 +697,21 @@ def get_oof_predictions(
                 scores["MeanPred"].append(ms)
                 print(f"    MeanPred score: {ms:.4f}")
 
-            # Weighted mean (VotingRegressor-style with weights)
             if add_weighted:
                 if weight_mode == 'manual':
                     if model_weights is None or len(model_weights) != n_models:
                         raise ValueError("Provide model_weights (len == n_models) for weight_mode='manual'.")
-                    w = _normalize_weights(model_weights)
-                else:  # auto (derive from per-model validation scores)
+                    w = _normalize_weights(model_weights).astype(np.float32)
+                else:
                     if scorer is None:
                         raise ValueError("weight_mode='auto' requires a scorer.")
                     per_model_scores = []
                     for j in range(n_models):
                         per_model_scores.append(scorer(y_valid, valid_stack[:, j]))
-                    w = np.asarray(per_model_scores, float)
+                    w = np.asarray(per_model_scores, dtype=np.float64)
                     if not scorer_greater_is_better:
-                        w = w.max() - w + 1e-12  # invert for losses
-                    w = _normalize_weights(w)
+                        w = w.max() - w + 1e-12
+                    w = _normalize_weights(w).astype(np.float32)
 
                 valid_wmean = (valid_stack * w).sum(axis=1)
                 test_wmean  = (test_stack  * w).sum(axis=1)
@@ -708,6 +723,10 @@ def get_oof_predictions(
                     wms = scorer(y_valid, valid_wmean)
                     scores["WeightedMeanPred"].append(wms)
                     print(f"    WeightedMeanPred score: {wms:.4f}")
+
+            # cleanup fold
+            del valid_preds_stack, test_preds_stack, valid_stack, test_stack
+            gc.collect()
 
     # ---------- Average test predictions across folds ----------
     n_folds = folds.get_n_splits()
@@ -726,7 +745,7 @@ def get_oof_predictions(
 
     # ---------- Return DataFrames ----------
     import pandas as pd
-    oof_train_df = pd.DataFrame(oof_train, columns=col_names, index=X.index)
-    oof_test_df  = pd.DataFrame(oof_test,  columns=col_names, index=X_test.index)
+    oof_train_df = pd.DataFrame(oof_train, columns=col_names, index=X_idx)
+    oof_test_df  = pd.DataFrame(oof_test,  columns=col_names, index=Xtest_idx)
 
     return oof_train_df, oof_test_df, scores, trained_models
