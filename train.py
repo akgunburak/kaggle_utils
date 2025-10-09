@@ -564,7 +564,7 @@ def get_oof_predictions(
                 valid_soft_sum += yv_proba
                 # hard-vote accumulators (no list)
                 for c in range(n_classes):
-                    valid_hard_votes[:, c] += (yv_pred == c).astype(np.float32)
+                    valid_hard_votes[:, c] += (yv_pred == c).reshape(-1).astype(np.float32)
 
                 # test side
                 yt_proba = model.predict_proba(X_test).astype(np.float32, copy=False)
