@@ -572,7 +572,7 @@ def get_oof_predictions(
                 test_soft_sum += yt_proba
                 yt_pred = model.predict(X_test)
                 for c in range(n_classes):
-                    test_hard_votes[:, c] += (yt_pred == c).astype(np.float32)
+                    test_hard_votes[:, c] += (yt_pred == c).reshape(-1).astype(np.float32)
 
                 if scorer is not None:
                     score = scorer(y_valid, yv_pred)
@@ -661,8 +661,8 @@ def get_oof_predictions(
                     vh = np.argmax(vp, axis=1)
                     th = np.argmax(tp, axis=1)
                     for c in range(n_classes):
-                        valid_wvotes[:, c] += wj * (vh == c).astype(np.float32)
-                        test_wvotes[:, c]  += wj * (th == c).astype(np.float32)
+                        valid_wvotes[:, c] += wj * (vh == c).reshape(-1).astype(np.float32)
+                        test_wvotes[:, c]  += wj * (th == c).reshape(-1).astype(np.float32)
                 oof_train[valid_idx, whard_slice] = valid_wvotes
                 oof_test[:, whard_slice] += test_wvotes
 
