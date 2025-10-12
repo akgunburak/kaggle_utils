@@ -12,8 +12,8 @@ def encode_categorical(
     high_card_strategy: str = "ordinal",  # "ordinal" | "target"
     drop_first: bool = False,
     dtype: type = float,
-    keep_original: bool = False,          # <— NEW
-    encoded_suffix: str = "__enc",        # <— NEW: avoids name clashes
+    keep_original: bool = False,
+    encoded_suffix: str = "__enc",        # avoids name clashes
     random_state: int = 24
 ):
     """
