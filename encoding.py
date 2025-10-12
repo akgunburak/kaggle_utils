@@ -14,6 +14,7 @@ def encode_categorical(
     dtype: type = float,
     keep_original: bool = False,          # <— NEW
     encoded_suffix: str = "__enc",        # <— NEW: avoids name clashes
+    random_state
 ):
     """
     Encode categorical features with:
@@ -111,7 +112,7 @@ def encode_categorical(
             if y_train is None:
                 raise ValueError("y_train must be provided when using target encoding.")
             te_enc = TargetEncoder()
-            tr = te_enc.fit_transform(X_train[high_cols], y_train)
+            tr = te_enc.fit_transform(X_train[high_cols], y_train, cv=5, random_state=random_state)
             te = te_enc.transform(X_test[high_cols])
 
             enc_cols = [f"{c}{encoded_suffix}" for c in high_cols]
