@@ -116,9 +116,11 @@ def encode_categorical(
             te = te_enc.transform(X_test[high_cols])
 
             enc_cols = [f"{c}{encoded_suffix}" for c in high_cols]
-            tr_df = pd.DataFrame(tr, index=X_train.index, columns=enc_cols).astype(dtype)
-            te_df = pd.DataFrame(te, index=X_test.index, columns=enc_cols).astype(dtype)
-
+            tr_df = pd.DataFrame(tr, index=X_train.index).astype(dtype)
+            te_df = pd.DataFrame(te, index=X_test.index).astype(dtype)
+            tr_df.columns = enc_cols
+            te_df.columns = enc_cols
+            
             Xtr_parts.append(tr_df)
             Xte_parts.append(te_df)
             artifacts["target"] = te_enc
