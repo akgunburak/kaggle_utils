@@ -14,7 +14,7 @@ def encode_categorical(
     dtype: type = float,
     keep_original: bool = False,          # <— NEW
     encoded_suffix: str = "__enc",        # <— NEW: avoids name clashes
-    random_state
+    random_state: int = 24
 ):
     """
     Encode categorical features with:
