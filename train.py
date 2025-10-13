@@ -429,7 +429,8 @@ def get_oof_predictions(
     weight_mode='none',                 # 'none' | 'manual' | 'auto'
     model_weights=None,                 # list[float] when weight_mode='manual'
     scorer_greater_is_better=True,      # set False if your scorer is a loss (lower is better)
-    keep_models=False                   # NEW: avoid storing all fold models by default
+    keep_models=False,                  # avoid storing all fold models by default
+    use_proba=True                      # Boolean flag that determines whether to use probability outputs or standard predictions
 ):
     """
     Memory-lean OOF predictions for stacking (classification or regression).
@@ -576,7 +577,10 @@ def get_oof_predictions(
                     test_hard_votes[:, c] += (yt_pred == c).reshape(-1).astype(np.float32)
 
                 if scorer is not None:
-                    score = scorer(y_valid, yv_pred)
+                    if use_proba:
+                        score = scorer(y_valid, yv_proba)
+                    else:
+                        score = scorer(y_valid, yv_pred)
                     scores[model.__class__.__name__].append(score)
                     if weight_mode == 'auto':
                         per_model_fold_scores.append(score)
