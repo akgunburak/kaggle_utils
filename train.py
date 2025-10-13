@@ -526,7 +526,7 @@ def get_oof_predictions(
 
     # ================= Cross-validation =================
     for i, (train_idx, valid_idx) in enumerate(folds.split(X, y)):
-        print(f"\nFold {i+1}/{folds.get_n_splits()}")
+        print(f"\nFold {i+1}/{folds.get_n_splits(X, y)}")
 
         # Pandas-friendly indexing
         X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
