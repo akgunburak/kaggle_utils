@@ -430,7 +430,8 @@ def get_oof_predictions(
     model_weights=None,                 # list[float] when weight_mode='manual'
     scorer_greater_is_better=True,      # set False if your scorer is a loss (lower is better)
     keep_models=False,                  # avoid storing all fold models by default
-    use_proba=True                      # Boolean flag that determines whether to use probability outputs or standard predictions
+    use_proba=True,                      # Boolean flag that determines whether to use probability outputs or standard predictions
+    cols_to_drop=None
 ):
     """
     Memory-lean OOF predictions for stacking (classification or regression).
@@ -531,7 +532,9 @@ def get_oof_predictions(
         # Pandas-friendly indexing
         X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
         X_valid, y_valid = X.iloc[valid_idx], y.iloc[valid_idx]
-
+        X_train = X_train.drop(cols_to_drop, axis=1)
+        X_valid = X_valid.drop(cols_to_drop, axis=1)
+        
         if task == 'classification':
             # Accumulators avoid keeping lists of hard predictions
             valid_soft_sum = np.zeros((len(valid_idx), n_classes), dtype=np.float32)
