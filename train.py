@@ -629,6 +629,13 @@ def get_oof_predictions(
 
             # scoring for ensemble features (hard labels)
             if scorer is not None:
+
+                if use_proba:
+                    score = scorer(y_valid, yv_proba[:, 1])
+                else:
+                    score = scorer(y_valid, yv_pred)
+
+                
                 sv = scorer(y_valid, np.argmax(valid_soft, axis=1))
                 hv = scorer(y_valid, np.argmax(valid_hard_prop, axis=1))
                 scores["SoftVoting"].append(sv)
