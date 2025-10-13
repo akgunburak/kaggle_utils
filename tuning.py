@@ -26,12 +26,6 @@ def objective_xgb_cv(trial, task, cross_val_splits, X, y, path,
       - high_card_strategy ('ordinal'|'target')
       - drop_first (bool)
     """
-
-    # ----- encoding params to optimize -----
-    enc_ohe_max_cardinality = trial.suggest_int("ohe_max_cardinality", 2, 20)
-    enc_high_card_strategy  = trial.suggest_categorical("high_card_strategy", ["ordinal", "target"])
-    enc_drop_first          = trial.suggest_categorical("drop_first", [False, True])
-    keep_original          = trial.suggest_categorical("keep_original", [False, True])
     
     # ----- XGBoost parameter space -----
     param = {
@@ -67,16 +61,6 @@ def objective_xgb_cv(trial, task, cross_val_splits, X, y, path,
     for fold, (train_idx_cv, val_idx_cv) in enumerate(cross_val_splits, start=1):
         X_train_cv, X_val = X.loc[train_idx_cv], X.loc[val_idx_cv]
         y_train_cv, y_val = y.loc[train_idx_cv], y.loc[val_idx_cv]
-
-        # ----- per-fold categorical encoding (fit on train only) -----
-        X_train_cv, X_val, _artifacts = encode_categorical(
-            X_train_cv, X_val,
-            y_train=y_train_cv if enc_high_card_strategy == "target" else None,
-            ohe_max_cardinality=enc_ohe_max_cardinality,
-            high_card_strategy=enc_high_card_strategy,
-            drop_first=enc_drop_first,
-            dtype=float
-        )
 
         # XGBoost prefers numeric; encoding has made everything numeric already.
         # Keep enable_categorical=False to avoid unexpected handling.
@@ -184,12 +168,6 @@ def objective_lgbm_cv(trial, task, cross_val_splits, X, y, path,
     n_classes : required for multiclass classification
     path : CSV file path where logs will be appended
     """
-                        
-    # ----- encoding params to optimize -----
-    enc_ohe_max_cardinality = trial.suggest_int("ohe_max_cardinality", 2, 20)
-    enc_high_card_strategy  = trial.suggest_categorical("high_card_strategy", ["ordinal", "target"])
-    enc_drop_first          = trial.suggest_categorical("drop_first", [False, True])
-    keep_original          = trial.suggest_categorical("keep_original", [False, True])
 
     # ----- parameter space -----
     param = {
@@ -226,16 +204,6 @@ def objective_lgbm_cv(trial, task, cross_val_splits, X, y, path,
         X_train_cv, X_val = X.loc[train_idx_cv], X.loc[val_idx_cv]
         y_train_cv, y_val = y.loc[train_idx_cv], y.loc[val_idx_cv]
         
-        # ----- per-fold categorical encoding (fit on train only) -----
-        X_train_cv, X_val, _artifacts = encode_categorical(
-            X_train_cv, X_val,
-            y_train=y_train_cv if enc_high_card_strategy == "target" else None,
-            ohe_max_cardinality=enc_ohe_max_cardinality,
-            high_card_strategy=enc_high_card_strategy,
-            drop_first=enc_drop_first,
-            dtype=float
-        )
-      
         if task in ['binary', 'multiclass']:
             model = lgb.LGBMClassifier(**param) if task != 'regression' else lgb.LGBMRegressor(**param)
         else:
@@ -339,12 +307,6 @@ def objective_cb_cv(trial, task, cross_val_splits, X, y, path,
     path : CSV file path where logs will be appended
     """
 
-    # ----- encoding params to optimize -----
-    enc_ohe_max_cardinality = trial.suggest_int("ohe_max_cardinality", 2, 20)
-    enc_high_card_strategy  = trial.suggest_categorical("high_card_strategy", ["ordinal", "target"])
-    enc_drop_first          = trial.suggest_categorical("drop_first", [False, True])
-    keep_original          = trial.suggest_categorical("keep_original", [False, True])
-
     # ----- parameter space -----
     param = {
         'iterations': trial.suggest_int('iterations', 300, 1000),  # reduce max iterations
@@ -386,16 +348,6 @@ def objective_cb_cv(trial, task, cross_val_splits, X, y, path,
     for fold, (train_idx_cv, val_idx_cv) in enumerate(cross_val_splits, start=1):
         X_train_cv, X_val = X.loc[train_idx_cv], X.loc[val_idx_cv]
         y_train_cv, y_val = y.loc[train_idx_cv], y.loc[val_idx_cv]
-
-        # ----- per-fold categorical encoding (fit on train only) -----
-        X_train_cv, X_val, _artifacts = encode_categorical(
-            X_train_cv, X_val,
-            y_train=y_train_cv if enc_high_card_strategy == "target" else None,
-            ohe_max_cardinality=enc_ohe_max_cardinality,
-            high_card_strategy=enc_high_card_strategy,
-            drop_first=enc_drop_first,
-            dtype=float
-        )
 
         if task in ['binary', 'multiclass']:
             model = CatBoostClassifier(**param) if task != 'regression' else CatBoostRegressor(**param)
@@ -495,7 +447,7 @@ def objective_rf_cv(trial, task, cross_val_splits, X, y, path,
     n_classes : required for multiclass classification
     path : CSV file path where logs will be appended
     """
-                                
+                          
     # ----- encoding params to optimize -----
     enc_ohe_max_cardinality = trial.suggest_int("ohe_max_cardinality", 2, 20)
     enc_high_card_strategy  = trial.suggest_categorical("high_card_strategy", ["ordinal", "target"])
