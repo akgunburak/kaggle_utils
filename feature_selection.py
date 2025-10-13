@@ -97,7 +97,8 @@ def drop_by_pps(
                     to_drop.append(f2)
                 else:
                     to_drop.append(f1)
-
+                    
+    print("*********Number of variables dropped by PPS: ", len(set(to_drop).to_list()), "\n")    
     return sorted(set(to_drop))
 
 
