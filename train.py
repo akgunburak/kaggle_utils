@@ -737,7 +737,7 @@ def get_oof_predictions(
             gc.collect()
 
     # ---------- Average test predictions across folds ----------
-    n_folds = folds.get_n_splits()
+    n_folds = folds.get_n_splits(X, y)
     oof_test /= n_folds
 
     # ---------- Print average scores ----------
