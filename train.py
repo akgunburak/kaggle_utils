@@ -578,7 +578,7 @@ def get_oof_predictions(
 
                 if scorer is not None:
                     if use_proba:
-                        score = scorer(y_valid, yv_proba)
+                        score = scorer(y_valid, yv_proba[:, 1])
                     else:
                         score = scorer(y_valid, yv_pred)
                     scores[model.__class__.__name__].append(score)
