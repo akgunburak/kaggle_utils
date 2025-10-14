@@ -18,7 +18,7 @@ from train import *
 
 
 def objective_xgb_cv(trial, task, cross_val_splits, X, y, path,
-                     metric="f1", pos_weight=None, n_classes=None):
+                     metric="f1", pos_weight=None, n_classes=None, enable_categorical=True):
     """
     Optuna objective for XGBoost with CV + categorical encoding per fold.
     Tunes encoding params:
@@ -39,6 +39,7 @@ def objective_xgb_cv(trial, task, cross_val_splits, X, y, path,
         'max_depth': trial.suggest_int('max_depth', 5, 100),
         'random_state': 2020,
         'min_child_weight': trial.suggest_int('min_child_weight', 1, 300),
+        'enable_categorical': True
     }
 
     if task == 'binary':
@@ -306,6 +307,10 @@ def objective_cb_cv(trial, task, cross_val_splits, X, y, path,
     n_classes : required for multiclass classification
     path : CSV file path where logs will be appended
     """
+                              
+    for col in X.columns:
+        if X[col].dtype == 'category':
+            X[col] = X_train[col].astype(str).fillna('Unknown').astype('category')
 
     # ----- parameter space -----
     param = {
@@ -317,7 +322,8 @@ def objective_cb_cv(trial, task, cross_val_splits, X, y, path,
         'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.3, 1),
         'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 20, 300),
         'random_seed': 2020,
-        'verbose': False
+        'verbose': False,
+        'cat_features': [col for col in X if X[col].dtype == 'category']
     }
 
     # choose a bootstrap type compatible with subsample or not
