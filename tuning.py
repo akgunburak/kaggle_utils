@@ -120,16 +120,9 @@ def objective_xgb_cv(trial, task, cross_val_splits, X, y, path,
         top_5_features = ', '.join(importance_df['Feature'].head(5).tolist())
 
         # ----- logging -----
-        enc_summary = {
-            'ohe_max_cardinality': enc_ohe_max_cardinality,
-            'high_card_strategy': enc_high_card_strategy,
-            'drop_first': enc_drop_first
-        }
-
         log_row = {
             'fold': fold,
             'params': str(param),
-            'encoding_params': str(enc_summary),
             'metric_name': metric,
             'metric_value': fold_score,
             'top_5_features': top_5_features
