@@ -38,8 +38,7 @@ def objective_xgb_cv(trial, task, cross_val_splits, X, y, path,
         'n_estimators': trial.suggest_int('n_estimators', 300, 3000),
         'max_depth': trial.suggest_int('max_depth', 5, 100),
         'random_state': 2020,
-        'min_child_weight': trial.suggest_int('min_child_weight', 1, 300),
-        'enable_categorical': True
+        'min_child_weight': trial.suggest_int('min_child_weight', 1, 300)
     }
 
     if task == 'binary':
@@ -63,10 +62,8 @@ def objective_xgb_cv(trial, task, cross_val_splits, X, y, path,
         X_train_cv, X_val = X.loc[train_idx_cv], X.loc[val_idx_cv]
         y_train_cv, y_val = y.loc[train_idx_cv], y.loc[val_idx_cv]
 
-        # XGBoost prefers numeric; encoding has made everything numeric already.
-        # Keep enable_categorical=False to avoid unexpected handling.
-        dtrain = xgb.DMatrix(X_train_cv, label=y_train_cv, enable_categorical=False)
-        dtest  = xgb.DMatrix(X_val,   label=y_val,     enable_categorical=False)
+        dtrain = xgb.DMatrix(X_train_cv, label=y_train_cv, enable_categorical=enable_categorical)
+        dtest  = xgb.DMatrix(X_val,   label=y_val,     enable_categorical=enable_categorical)
 
         bst = xgb.train(param, dtrain, evals=[(dtest, "test")], verbose_eval=False)
         preds = bst.predict(dtest)
