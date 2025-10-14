@@ -300,7 +300,7 @@ def objective_cb_cv(trial, task, cross_val_splits, X, y, path,
                               
     for col in X.columns:
         if X[col].dtype == 'category':
-            X[col] = X_train[col].astype(str).fillna('Unknown').astype('category')
+            X[col] = X[col].astype(str).fillna('Unknown').astype('category')
 
     # ----- parameter space -----
     param = {
@@ -602,9 +602,7 @@ def objective_torchmlp_cv(trial, task, cross_val_splits, X, y, path,
         'weight_decay': weight_decay, 'batch_size': batch_size, 'epochs': epochs,
         'patience': patience, 'grad_clip': grad_clip, 'val_size': val_size,
         'scale_features': scale_features, 'optimize_threshold': optimize_threshold,
-        'threshold_metric': threshold_metric, 'random_state': 2020, 'device': 'auto',
-        'ohe_max_cardinality': ohe_max_cardinality, 'high_card_strategy': high_card_strategy,
-        'drop_first_ohe': drop_first_ohe
+        'threshold_metric': threshold_metric, 'random_state': 2020, 'device': 'auto'
     }
 
     # ensure pandas (the encoder expects DataFrame/Series)
