@@ -593,11 +593,6 @@ def objective_torchmlp_cv(trial, task, cross_val_splits, X, y, path,
     grad_clip     = trial.suggest_float('grad_clip', 0.5, 5.0) if use_grad_clip else None
     val_size      = trial.suggest_float('val_size', 0.05, 0.2)
 
-    # ----------------- hyperparameter space (encoding) -----------------
-    ohe_max_cardinality = trial.suggest_int('ohe_max_cardinality', 2, 10)
-    high_card_strategy  = trial.suggest_categorical('high_card_strategy', ['ordinal', 'target'])
-    drop_first_ohe      = trial.suggest_categorical('drop_first_ohe', [False, True])
-
     # estimator options that must stay ON (you asked not to disable scaler)
     scale_features = True
     optimize_threshold = (task == 'binary') and (metric in {'f1','accuracy','precision','recall'})
@@ -633,9 +628,9 @@ def objective_torchmlp_cv(trial, task, cross_val_splits, X, y, path,
         # ---- encode categoricals per fold (NO external scaling; model will scale internally) ----
         Xtr_cv, Xva_cv, enc_artifacts = encode_categorical(
             X_train_cv, X_val, y_train=y_train_cv if high_card_strategy == "target" else None,
-            ohe_max_cardinality=ohe_max_cardinality,
-            high_card_strategy=high_card_strategy,
-            drop_first=drop_first_ohe,
+            ohe_max_cardinality=0,
+            high_card_strategy="target",
+            drop_first=False,
             dtype=float
         )
 
