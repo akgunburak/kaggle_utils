@@ -622,7 +622,7 @@ def objective_torchmlp_cv(trial, task, cross_val_splits, X, y, path,
 
         # ---- encode categoricals per fold (NO external scaling; model will scale internally) ----
         Xtr_cv, Xva_cv, enc_artifacts = encode_categorical(
-            X_train_cv, X_val, y_train=y_train_cv if high_card_strategy == "target" else None,
+            X_train_cv, X_val, y_train=y_train_cv,
             ohe_max_cardinality=0,
             high_card_strategy="target",
             drop_first=False,
