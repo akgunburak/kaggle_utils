@@ -287,7 +287,7 @@ def objective_lgbm_cv(trial, task, cross_val_splits, X, y, path,
 
 
 def objective_cb_cv(trial, task, cross_val_splits, X, y, path,
-                          metric="f1", n_classes=None, task_type):
+                          metric="f1", n_classes=None, task_type="CPU"):
     """
     Optuna objective for CatBoost with CV.
 
