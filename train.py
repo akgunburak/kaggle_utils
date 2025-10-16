@@ -23,6 +23,7 @@ def _set_global_seed(seed: int):
 # ------------ dataset wrapper ------------
 class _TabDataset(Dataset):
     def __init__(self, X, y=None):
+
         self.X = np.asarray(X, dtype=np.float32)
         self.y = None if y is None else np.asarray(y)
 
@@ -130,6 +131,13 @@ def _predict_logits(model, loader, task, device):
             outs.append(logits.detach().cpu().numpy())
     return np.concatenate(outs, axis=0)
 
+# compute whether it's safe/necessary to drop last batch for BN
+def _should_drop_last(n_samples, batch_size, use_batchnorm):
+    if not use_batchnorm:
+        return False
+    # only drop if you actually have at least 2 full batches
+    return (n_samples // batch_size) >= 2
+
 # =========================================================
 #                  Classifier Estimator
 # =========================================================
@@ -155,11 +163,12 @@ class TorchMLPClassifier(BaseEstimator, ClassifierMixin):
         patience=20,
         grad_clip=None,
         val_size=0.1,
-        scale_features=False,        # internal StandardScaler
-        optimize_threshold=False,    # binary: tune decision threshold on val set
+        scale_features=True,        # internal StandardScaler
+        optimize_threshold=True,    # binary: tune decision threshold on val set
         threshold_metric="f1",       # {"f1","accuracy"} for tuning
         device="auto",               # "auto" | "cpu" | "cuda"
         random_state=42,
+        pos_weight=None
     ):
         self.hidden_dim = hidden_dim
         self.n_layers = n_layers
@@ -179,11 +188,16 @@ class TorchMLPClassifier(BaseEstimator, ClassifierMixin):
         self.threshold_metric = threshold_metric
         self.device = device
         self.random_state = random_state
+        self.pos_weight = pos_weight
 
     # ---- sklearn API ----
     def fit(self, X, y):
         _set_global_seed(self.random_state)
 
+        X = X.fillna(X.median(numeric_only=True)).dropna(how="all", axis=1)
+        X = X.select_dtypes(include=["number"])
+        self.cols = X.columns.to_list()
+        
         X = np.asarray(X)
         y = np.asarray(y)
         self.classes_, y_idx = np.unique(y, return_inverse=True)
@@ -222,9 +236,19 @@ class TorchMLPClassifier(BaseEstimator, ClassifierMixin):
         self.device_ = dev
         self.model_.to(self.device_)
 
+        pos_w = None
+        if self.task_ == "binary":
+            if self.pos_weight is not None:
+                pos_w = torch.tensor(self.pos_weight, dtype=torch.float32, device=self.device_)
+            else:
+                # auto-compute from train split (N_neg / N_pos)
+                p = (y_tr == 1).mean()
+                if 0 < p < 1:
+                    pos_w = torch.tensor((1 - p) / p, dtype=torch.float32, device=self.device_)
+        
         # losses & optimizer
         if self.task_ == "binary":
-            loss_fn = nn.BCEWithLogitsLoss()
+            loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_w)
         else:
             loss_fn = nn.CrossEntropyLoss()
 
@@ -232,9 +256,21 @@ class TorchMLPClassifier(BaseEstimator, ClassifierMixin):
             self.model_.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
         )
 
+        drop_last_train = _should_drop_last(len(X_tr), self.batch_size, self.batchnorm)
+        
         # loaders
-        train_dl = DataLoader(_TabDataset(X_tr, y_tr), batch_size=self.batch_size, shuffle=True)
-        val_dl   = DataLoader(_TabDataset(X_va, y_va), batch_size=self.batch_size, shuffle=False)
+        train_dl = DataLoader(
+            _TabDataset(X_tr, y_tr),
+            batch_size=self.batch_size,
+            shuffle=True,
+            drop_last=drop_last_train
+        )
+        val_dl   = DataLoader(
+            _TabDataset(X_va, y_va),
+            batch_size=self.batch_size,
+            shuffle=False,
+            drop_last=False
+        )        
 
         # train
         _train_with_early_stopping(
@@ -269,6 +305,8 @@ class TorchMLPClassifier(BaseEstimator, ClassifierMixin):
         return self
 
     def _transform_X(self, X):
+        X = X[self.cols]
+        X = X.fillna(X.median(numeric_only=True)).dropna(how="all", axis=1)
         X = np.asarray(X, dtype=np.float32)
         if hasattr(self, "scaler_") and self.scaler_ is not None:
             X = self.scaler_.transform(X)
@@ -328,9 +366,9 @@ class TorchMLPRegressor(BaseEstimator, RegressorMixin):
         patience=20,
         grad_clip=None,
         val_size=0.1,
-        scale_features=False,
+        scale_features=True,
         device="auto",
-        random_state=42,
+        random_state=16,
         loss="mse"  # "mse" or "mae"
     ):
         self.hidden_dim = hidden_dim
@@ -353,7 +391,10 @@ class TorchMLPRegressor(BaseEstimator, RegressorMixin):
 
     def fit(self, X, y):
         _set_global_seed(self.random_state)
-
+    
+        X = X.fillna(X.median(numeric_only=True)).dropna(how="all", axis=1)
+        X = X.select_dtypes(include=["number"])
+        self.cols = X.columns.to_list()        
         X = np.asarray(X)
         y = np.asarray(y)
 
@@ -390,9 +431,21 @@ class TorchMLPRegressor(BaseEstimator, RegressorMixin):
             self.model_.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
         )
 
-        train_dl = DataLoader(_TabDataset(X_tr, y_tr), batch_size=self.batch_size, shuffle=True)
-        val_dl   = DataLoader(_TabDataset(X_va, y_va), batch_size=self.batch_size, shuffle=False)
-
+        drop_last_train = _should_drop_last(len(X_tr), self.batch_size, self.batchnorm)
+        
+        train_dl = DataLoader(
+            _TabDataset(X_tr, y_tr),
+            batch_size=self.batch_size,
+            shuffle=True,
+            drop_last=drop_last_train
+        )
+        val_dl   = DataLoader(
+            _TabDataset(X_va, y_va),
+            batch_size=self.batch_size,
+            shuffle=False,
+            drop_last=False
+        )
+        
         _train_with_early_stopping(
             self.model_, opt, loss_fn, train_dl, val_dl,
             task="regression", device=self.device_,
@@ -403,6 +456,8 @@ class TorchMLPRegressor(BaseEstimator, RegressorMixin):
         return self
 
     def _transform_X(self, X):
+        X = X[self.cols]
+        X = X.fillna(X.median(numeric_only=True)).dropna(how="all", axis=1)
         X = np.asarray(X, dtype=np.float32)
         if hasattr(self, "scaler_") and self.scaler_ is not None:
             X = self.scaler_.transform(X)
