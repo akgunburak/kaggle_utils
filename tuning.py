@@ -305,12 +305,11 @@ def objective_cb_cv(trial, task, cross_val_splits, X, y, path,
 
     # ----- parameter space -----
     param = {
-        'iterations': trial.suggest_int('iterations', 300, 1000),  # reduce max iterations
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1),  # focus on realistic LRs
-        'depth': trial.suggest_int('depth', 4, 10),  # typical effective depths
+        'iterations': trial.suggest_int('iterations', 300, 1000),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1),
+        'depth': trial.suggest_int('depth', 4, 10),
         'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1e-2, 10.0, log=True),
-        'border_count': trial.suggest_int('border_count', 32, 128),  # fewer splits
-        'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.3, 1),
+        'border_count': trial.suggest_int('border_count', 32, 128),
         'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 20, 300),
         'random_seed': 2020,
         'verbose': False,
@@ -321,7 +320,10 @@ def objective_cb_cv(trial, task, cross_val_splits, X, y, path,
     # choose a bootstrap type compatible with subsample or not
     bootstrap_type = trial.suggest_categorical('bootstrap_type', ['Bayesian', 'Bernoulli'])
     param['bootstrap_type'] = bootstrap_type
-    
+
+    if task_type == "CPU":
+        param['colsample_bylevel'] = trial.suggest_float('colsample_bylevel', 0.3, 1)
+
     if bootstrap_type == 'Bayesian':
         # subsample is NOT allowed; use bagging_temperature instead (0 => no sampling, higher => more)
         param['bagging_temperature'] = trial.suggest_float('bagging_temperature', 0.0, 10.0)
