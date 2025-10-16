@@ -148,7 +148,7 @@ def objective_xgb_cv(trial, task, cross_val_splits, X, y, path,
 
 
 def objective_lgbm_cv(trial, task, cross_val_splits, X, y, path,
-                      metric="f1", n_classes=None):
+                      metric="f1", n_classes=None, device="cpu"):
     """
     Optuna objective for LightGBM with CV.
 
@@ -174,7 +174,8 @@ def objective_lgbm_cv(trial, task, cross_val_splits, X, y, path,
         'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.5),
         'n_estimators': trial.suggest_int('n_estimators', 300, 3000),
         'random_state': 2020,
-        'verbose': False
+        'verbose': False,
+        "device": device
     }
 
     if task == 'binary':
@@ -286,7 +287,7 @@ def objective_lgbm_cv(trial, task, cross_val_splits, X, y, path,
 
 
 def objective_cb_cv(trial, task, cross_val_splits, X, y, path,
-                          metric="f1", n_classes=None):
+                          metric="f1", n_classes=None, task_type):
     """
     Optuna objective for CatBoost with CV.
 
@@ -313,7 +314,8 @@ def objective_cb_cv(trial, task, cross_val_splits, X, y, path,
         'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 20, 300),
         'random_seed': 2020,
         'verbose': False,
-        'cat_features': [col for col in X if X[col].dtype == 'category']
+        'cat_features': [col for col in X if X[col].dtype == 'category'],
+        "task_type": task_type
     }
 
     # choose a bootstrap type compatible with subsample or not
