@@ -437,7 +437,10 @@ def get_oof_predictions(
     Memory-lean OOF predictions for stacking (classification or regression).
     Returns: oof_train_df, oof_test_df, scores, trained_models (possibly empty)
     """
-    X_test = X_test.drop(cols_to_drop, axis=1)
+    try:
+        X_test = X_test.drop(cols_to_drop, axis=1)
+    except:
+        pass
 
     def _normalize_weights(w):
         w = np.array(w, dtype=np.float64)  # small, OK as float64
