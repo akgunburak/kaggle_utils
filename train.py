@@ -233,8 +233,8 @@ class TorchMLPClassifier(BaseEstimator, ClassifierMixin):
         )
 
         # loaders
-        train_dl = DataLoader(_TabDataset(X_tr, y_tr), batch_size=self.batch_size, shuffle=True, drop_last=True)
-        val_dl   = DataLoader(_TabDataset(X_va, y_va), batch_size=self.batch_size, shuffle=False, drop_last=True)
+        train_dl = DataLoader(_TabDataset(X_tr, y_tr), batch_size=self.batch_size, shuffle=True)
+        val_dl   = DataLoader(_TabDataset(X_va, y_va), batch_size=self.batch_size, shuffle=False)
 
         # train
         _train_with_early_stopping(
@@ -248,7 +248,7 @@ class TorchMLPClassifier(BaseEstimator, ClassifierMixin):
         if self.task_ == "binary" and self.optimize_threshold:
             # compute probs on val and tune threshold
             X_val_infer = X_va
-            val_loader = DataLoader(_TabDataset(X_val_infer), batch_size=1024, shuffle=False, drop_last=True)
+            val_loader = DataLoader(_TabDataset(X_val_infer), batch_size=1024, shuffle=False)
             logits = _predict_logits(self.model_, val_loader, self.task_, self.device_)
             probs = 1.0 / (1.0 + np.exp(-logits))
             grid = np.linspace(0.05, 0.95, 19)
@@ -277,7 +277,7 @@ class TorchMLPClassifier(BaseEstimator, ClassifierMixin):
     def predict_proba(self, X):
         check_is_fitted(self, "model_")
         X = self._transform_X(X)
-        loader = DataLoader(_TabDataset(X), batch_size=1024, shuffle=False, drop_last=True)
+        loader = DataLoader(_TabDataset(X), batch_size=1024, shuffle=False)
         logits = _predict_logits(self.model_, loader, self.task_, self.device_)
         if self.task_ == "binary":
             p1 = 1.0 / (1.0 + np.exp(-logits))
@@ -390,8 +390,8 @@ class TorchMLPRegressor(BaseEstimator, RegressorMixin):
             self.model_.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
         )
 
-        train_dl = DataLoader(_TabDataset(X_tr, y_tr), batch_size=self.batch_size, shuffle=True, drop_last=True)
-        val_dl   = DataLoader(_TabDataset(X_va, y_va), batch_size=self.batch_size, shuffle=False, drop_last=True)
+        train_dl = DataLoader(_TabDataset(X_tr, y_tr), batch_size=self.batch_size, shuffle=True)
+        val_dl   = DataLoader(_TabDataset(X_va, y_va), batch_size=self.batch_size, shuffle=False)
 
         _train_with_early_stopping(
             self.model_, opt, loss_fn, train_dl, val_dl,
@@ -411,7 +411,7 @@ class TorchMLPRegressor(BaseEstimator, RegressorMixin):
     def predict(self, X):
         check_is_fitted(self, "model_")
         X = self._transform_X(X)
-        loader = DataLoader(_TabDataset(X), batch_size=1024, shuffle=False, drop_last=True)
+        loader = DataLoader(_TabDataset(X), batch_size=1024, shuffle=False)
         preds = _predict_logits(self.model_, loader, "regression", self.device_)
         return preds.reshape(-1)
 
