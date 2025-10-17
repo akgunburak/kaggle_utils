@@ -122,7 +122,7 @@ def boruta_feature_selection(
         Must be "classification" or "regression".
     """
 
-    X = X.copy()
+    X = X.dropna(how="all", axis=1).copy()
 
     # --- split & impute
     num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
