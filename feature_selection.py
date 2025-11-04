@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from typing import List, Iterable, Tuple, Dict, Any, Optional, Callable
+from typing import List, Iterable, Tuple, Dict, Any, Optional, Callable, Union
 import pickle
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
