@@ -104,7 +104,7 @@ def drop_by_pps(
 
 def boruta_feature_selection(
     X: pd.DataFrame,
-    y: pd.Series | np.ndarray,
+    y: Union[pd.Series, np.ndarray],
     *,
     task: str,                              # must be "classification" or "regression"
     rf_n_estimators: int = 600,
