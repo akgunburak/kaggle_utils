@@ -113,7 +113,7 @@ def boruta_feature_selection(
     rf_class_weight: Optional[str] = None,  # only for classification
     boruta_verbose: int = 0,
     boruta_n_estimators: Union[str, int] = "auto"
-) -> Tuple[list[str], Dict[str, Any]] | list[str]:
+) -> Union[Tuple[list[str], Dict[str, Any]], list[str]]:
     """Boruta feature selection with TargetEncoder for categoricals.
     
     Parameters
